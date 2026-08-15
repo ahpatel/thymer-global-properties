@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.0.1 — 2026-08-16
+
+- **Fixed: identical properties listing more than once.** The grouping key was built by ignoring `id` and `icon` and keeping everything else, so a property still carrying leftover keys from a type it used to be was treated as different. Nine "Due Date" datetime properties grouped together while two more listed separately, because those two kept a `choices` array from when they were choice fields, with every option archived: dead data, invisible in the interface, and meaningless to a datetime property. The key is now an allowlist of what actually defines a property for its type, and archived choice options are ignored.
+- When a group's members differ in ways the key ignores, the copied definition is now taken from the variant the most collections use, breaking ties toward the leanest one, so a copy no longer carries another collection's leftovers.
+
 ## v1.0.0 — 2026-08-15
 
 First public release.

@@ -889,17 +889,38 @@ class Plugin extends AppPlugin {
 	 *  definition, and the id only decides collision detection. Everything else
 	 *  (type, icon, many, choices, link target, format) is what makes two
 	 *  properties the same or different, so that is the signature. */
-	/** Ignores `id` and `icon`. The id is per collection and decides only
-	 *  collision detection. The icon is decoration: two Timeblock properties
-	 *  identical in type, link target and multi-value differed only by icon
-	 *  (ti-align-left vs ti-notes) and listed twice, which is not a distinction
-	 *  worth making the user resolve. Everything functional (type, many,
-	 *  choices, link target, format, read_only) stays in the signature. */
+	/* Which keys actually define a property, PER TYPE. Anything outside this is
+	 * either per collection (`id`), decoration (`icon`), or leftover from a type
+	 * the property used to be.
+	 *
+	 * That last case is not hypothetical: nine "Due Date" datetime properties
+	 * matched each other, while the ones in Groceries and Recipes each listed
+	 * separately because they still carried a `choices` array from back when
+	 * they were choice fields. Every one of those options was `active: false`.
+	 * Dead data, invisible in the UI, meaningless to a datetime property, and it
+	 * split one row into three with nothing on screen to explain why. An
+	 * allowlist keyed on the type cannot be fooled that way; a denylist of
+	 * "ignore id and icon" was. */
+	static SIG_KEYS_BY_TYPE = {
+		choice: ["choices"],
+		record: ["filter_colguid"],
+		number: ["number_format"],
+		text: ["min_length"],
+	};
+
 	_propSignature(f) {
-		const o = {};
-		for (const k of Object.keys(f).sort()) {
-			if (k === "id" || k === "icon") continue;
-			o[k] = f[k];
+		// The LABEL is part of the identity. Leaving it out collapsed every
+		// datetime field in the workspace into one row (178 rows became 92) and
+		// made "Due Date" disappear behind whichever label won the group.
+		const o = { label: (f.label || "").trim(), type: f.type,
+			many: !!f.many, read_only: !!f.read_only };
+		for (const k of (Plugin.SIG_KEYS_BY_TYPE[f.type] || [])) {
+			if (f[k] === undefined) continue;
+			// Archived options are not part of what a choice property does.
+			o[k] = (k === "choices" && Array.isArray(f[k]))
+				? f[k].filter((c) => c && c.active !== false)
+					.map((c) => ({ label: c.label, color: String(c.color) }))
+				: f[k];
 		}
 		return JSON.stringify(o);
 	}
@@ -916,17 +937,23 @@ class Plugin extends AppPlugin {
 			if (!bySig.has(sig)) bySig.set(sig, { key: sig, cols: [], variants: new Map() });
 			const g = bySig.get(sig);
 			g.cols.push(r.col.name);
-			// Members of a group can still differ by icon. Copying has to pick
-			// one, so pick the icon the most collections actually use rather
-			// than whichever happened to be read first.
-			const vk = r.field.icon || "";
-			if (!g.variants.has(vk)) g.variants.set(vk, { field: r.field, n: 0 });
+			// Members of a group can still differ in ways the signature ignores
+			// (icon, dead keys from a former type). Copying has to pick one, so
+			// key the variants on the FULL definition and prefer the one the
+			// most collections use, breaking ties toward the leanest object so
+			// a copy does not carry another collection's leftovers.
+			const vk = JSON.stringify(r.field, Object.keys(r.field).sort());
+			if (!g.variants.has(vk)) {
+				g.variants.set(vk, { field: r.field, n: 0, keys: Object.keys(r.field).length });
+			}
 			g.variants.get(vk).n++;
 		}
 		const out = [];
 		for (const g of bySig.values()) {
 			let best = null;
-			for (const v of g.variants.values()) if (!best || v.n > best.n) best = v;
+			for (const v of g.variants.values()) {
+				if (!best || v.n > best.n || (v.n === best.n && v.keys < best.keys)) best = v;
+			}
 			out.push({ key: g.key, field: best.field, cols: g.cols });
 		}
 		return out.sort((a, b) =>
