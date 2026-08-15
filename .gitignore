@@ -8,5 +8,5 @@ HANDOVER.md
 # screenshots stay local.
 Assets/*
 !Assets/add-properties.png
-!Assets/templates.png
-!Assets/preview.png
+!Assets/new-template.png
+!Assets/edit-template.png

@@ -4,6 +4,8 @@ Global Properties is a [Thymer](https://thymer.com) plugin that lets you reuse p
 
 Thymer's properties are defined per collection, so a "Status" you set up carefully in one place has to be rebuilt by hand everywhere else: the same type, the same options, the same colours, the same linked collection, every time. This plugin copies the definition instead.
 
+![Adding properties](Assets/add-properties.png)
+
 ## What it copies
 
 The whole property definition, not just its name and type:
@@ -22,6 +24,8 @@ Two commands in the Command Palette.
 
 **Global Properties: New Template** saves a collection's properties as a reusable set. Pick the collection, tick what belongs in the template, name it.
 
+![Creating a template](Assets/new-template.png)
+
 Search matches property names, and the collections a property already lives in. Up and Down move through results, Enter takes the highlighted one, and what you have ticked rises to a **Selected** section at the top so a handful of picks scattered through a long list stay visible.
 
 ### It is additive, always
@@ -35,6 +39,8 @@ New properties are added to the collection, not to any view. Add them as columns
 ### Templates
 
 **Manage Templates** on the Add Properties screen lists everything you have saved. Each template can be applied, renamed, edited (drop properties it should stop carrying) or deleted. Deleting a template never touches properties already added to collections.
+
+![Editing a template](Assets/edit-template.png)
 
 Templates are stored in the plugin's own configuration, so they sync with your workspace, and are mirrored to `localStorage` as a recovery copy.
 
