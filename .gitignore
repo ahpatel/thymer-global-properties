@@ -1,0 +1,12 @@
+.DS_Store
+
+# Internal tooling: deploy recipe and workspace notes stay local.
+deploy.mjs
+HANDOVER.md
+
+# Assets: ship only what the README uses. Source recordings and raw
+# screenshots stay local.
+Assets/*
+!Assets/add-properties.png
+!Assets/templates.png
+!Assets/preview.png

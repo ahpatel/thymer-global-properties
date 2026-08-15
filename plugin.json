@@ -1,0 +1,7 @@
+{
+	"ver": 1,
+	"version": "1.0.0",
+	"name": "Global Properties",
+	"icon": "ti-align-left",
+	"description": "Reuse properties across collections. Add any property from anywhere in the workspace to any other collection, or save a whole set as a template and apply it in a couple of clicks. Copies the full definition: type, icon, multi-value, choice options and their colours, number format, and which collection a linked-record property points at. Purely additive: it never edits or removes anything that is already there, and it skips any property whose name the target collection already uses."
+}
