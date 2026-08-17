@@ -35,7 +35,7 @@ It copies the whole property definition, not just the name and type:
 - which collection a linked-record property points at
 - the icon
 
-### It only adds
+#### It only adds
 
 An apply only ever **adds**. It never edits or removes anything already in the target collection: every pre-existing property comes through byte-identical, and so does every other collection setting.
 
@@ -44,6 +44,12 @@ The one thing it can change is **order**, and only where the interface says so. 
 A property whose name the target already uses is skipped, and step 2 spells out what will be added and what will be skipped, per collection, before anything is written. Untick anything there to leave it out of that one apply without changing the template.
 
 New properties are added to the collection, not to any view. Add them as columns yourself where you want them.
+
+#### Change
+
+Not a screen of its own and not in the sidebar: it is reached from a **drifted property's row, here in Add Properties**, because you only learn a definition has drifted while looking at that property. That fixes the direction for free.
+
+It conforms a property **in place**: the id and the label are kept and only the behavioural keys are overwritten, because record values key on the id and a remove-and-re-add would orphan every one of them. It counts the records each change touches before you commit, and asks for a confirmation tick.
 
 ### Templates
 
@@ -58,10 +64,6 @@ Templates are stored in the plugin's own configuration, so they sync with your w
 ![Rearrange](Assets/rearrange.png)
 
 Browse any collection and drag its properties into the order you want. It adds and removes nothing, and built-in and archived properties keep their exact positions. A property you have moved is marked **MOVED**, and dragging it back where it started clears the mark. Save stays disabled until something has actually moved.
-
-### Change
-
-Reached from a drifted property's row in Add Properties, never from the sidebar, because you only learn a definition has drifted while looking at that property. It conforms a property **in place**: the id and the label are kept and only the behavioural keys are overwritten, because record values key on the id and a remove-and-re-add would orphan every one of them. It counts the records each change touches before you commit, and asks for a confirmation tick.
 
 ## New Records
 
