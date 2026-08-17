@@ -6,9 +6,7 @@ Thymer's properties are defined per collection, so a "Status" you set up careful
 
 One dialog, five screens, split the way the work splits.
 
-<video src="https://github.com/parham-shafti/thymer-global-properties/raw/main/Assets/walkthrough.mp4" controls muted playsinline width="100%"></video>
-
-*[Watch the walkthrough](Assets/walkthrough.mp4) (22 seconds) if the player above does not load.*
+**[▶ Watch the walkthrough](Assets/walkthrough.mp4)** (22 seconds)
 
 | PROPERTIES | |
 |---|---|
