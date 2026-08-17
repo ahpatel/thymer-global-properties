@@ -6,8 +6,6 @@ Thymer's properties are defined per collection, so a "Status" you set up careful
 
 One dialog, five screens, split the way the work splits.
 
-**[▶ Watch the walkthrough](Assets/walkthrough.mp4)** (22 seconds)
-
 | PROPERTIES | |
 |---|---|
 | **Add Properties** | copy any property, or a whole template, into any collections |
@@ -24,6 +22,8 @@ Each screen has its own command in the Command Palette, all prefixed `Global Pro
 ## Properties
 
 ### Add Properties
+
+**[▶ Watch it in action](Assets/walkthrough.mp4)** (22 seconds)
 
 Two steps. **What and Where** puts properties and templates on the left and target collections on the right, each with its own search. Both halves are multi-select, so several templates can go into several collections in one pass, and every row says what the apply would do to it: *adds 2*, *adds 1, skips 1*. Ticked rows on both sides lift into a **Selected** group at the top, so a handful of picks scattered through a long list stay visible. **Order** then places the new fields among the existing ones, per collection, by dragging.
 
