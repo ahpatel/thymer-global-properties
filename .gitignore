@@ -8,6 +8,7 @@ HANDOVER.md
 # screenshots stay local.
 Assets/*
 !Assets/add-properties.gif
+!Assets/change.png
 !Assets/templates.png
 !Assets/rearrange.png
 !Assets/inherited-values.png

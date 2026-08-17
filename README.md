@@ -47,6 +47,8 @@ New properties are added to the collection, not to any view. Add them as columns
 
 #### Change
 
+![Change](Assets/change.png)
+
 Not a screen of its own and not in the sidebar: it is reached from a **drifted property's row, here in Add Properties**, because you only learn a definition has drifted while looking at that property. That fixes the direction for free.
 
 It conforms a property **in place**: the id and the label are kept and only the behavioural keys are overwritten, because record values key on the id and a remove-and-re-add would orphan every one of them. It counts the records each change touches before you commit, and asks for a confirmation tick.
