@@ -1,7 +1,7 @@
 {
 	"ver": 1,
-	"version": "1.0.1",
+	"version": "1.2.0",
 	"name": "Global Properties",
 	"icon": "ti-align-left",
-	"description": "Reuse properties across collections. Add any property from anywhere in the workspace to any other collection, or save a whole set as a template and apply it in a couple of clicks. Copies the full definition: type, icon, multi-value, choice options and their colours, number format, and which collection a linked-record property points at. Purely additive: it never edits or removes anything that is already there, and it skips any property whose name the target collection already uses."
+	"description": "Reuse properties across collections. Add any property from anywhere in the workspace to any other collection, or save a whole set as a template and apply it in a couple of clicks. Copies the full definition: type, icon, multi-value, choice options and their colours, number format, and which collection a linked-record property points at. It also decides what new records start with: values inherited from the record you created them inside, and fixed defaults per field. Adding is purely additive and skips any property whose name the target already uses; the one thing it can change is the order you place the new fields in."
 }
