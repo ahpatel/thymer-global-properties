@@ -365,7 +365,16 @@ class Plugin extends AppPlugin {
 	 * viewport only when neither side fits. Re-anchored on scroll, because the
 	 * band underneath it can still move. */
 	_placePop(anchor, pop, align) {
-		const trigger = anchor.querySelector("button") || anchor.firstElementChild || anchor;
+		// The trigger is the anchor's OWN control, never anything inside the
+		// popover. Most anchors hold a trigger button followed by the popover, so
+		// the first button in document order was the right one; the record-cost
+		// cell does not — its trigger is a plain span, and the first button is the
+		// popover's own footer link. place() resets the popover to 0,0 before it
+		// measures, so that link measured at the viewport origin and the popover
+		// was thrown to the far left of the screen, clear of the dialog.
+		const trigger = Array.from(anchor.querySelectorAll("button")).find((b) => !pop.contains(b))
+			|| Array.from(anchor.children).find((el) => el !== pop)
+			|| anchor;
 		const place = () => {
 			if (!pop.isConnected) return;
 			pop.style.position = "fixed";

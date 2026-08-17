@@ -7,11 +7,11 @@ HANDOVER.md
 # Assets: ship only what the README uses. Source recordings and raw
 # screenshots stay local.
 Assets/*
+!Assets/add-properties.gif
 !Assets/templates.png
 !Assets/rearrange.png
 !Assets/inherited-values.png
 !Assets/default-values.png
-!Assets/walkthrough.mp4
 
 # Verification harness: measures the live plugin against the design file.
 # Internal tooling, like deploy.mjs and HANDOVER.md.
