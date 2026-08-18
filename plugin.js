@@ -1444,17 +1444,22 @@ class Plugin extends AppPlugin {
 		// the genuinely-empty case still lands on the import screen.
 		if (!s.rules.rules.length) s.rules = this._loadRules();
 
-		// With nothing imported, the only useful thing this screen offers is the
-		// import itself.
+		// The import REPLACES this screen only when there is something to import.
+		// It used to replace it unconditionally: a workspace that never had
+		// Auto-Init From Ancestor got a heading, one sentence, and nothing else.
+		// No picker, no way to add a collection, so BOTH value screens were a
+		// dead end for every new user — which is exactly what the first person
+		// to install 1.2.0 hit. With no import on offer, fall through to the
+		// normal screen, which carries its own empty state and the picker.
 		if (!s.rules.rules.length) {
 			const found = await this._findAutoInit();
-			const screen = this._screen(p);
-			const head = this._padTop(screen);
-			this._add(head, '<div class="gp-h2">' +
-				(mode === "inherit" ? "Inherited Values" : "Default Values") + "</div>" +
-				'<div class="gp-blurb gp-blurb-640">Nothing here decides what a new record ' +
-				"starts with yet.</div>");
 			if (found) {
+				const screen = this._screen(p);
+				const head = this._padTop(screen);
+				this._add(head, '<div class="gp-h2">' +
+					(mode === "inherit" ? "Inherited Values" : "Default Values") + "</div>" +
+					'<div class="gp-blurb gp-blurb-640">Nothing here decides what a new record ' +
+					"starts with yet.</div>");
 				const n = Object.values(found.ai.collections || {})
 					.reduce((acc, c) => acc + Object.keys(c.fields || {}).length, 0);
 				const box = this._padScroll(screen);
@@ -1466,8 +1471,8 @@ class Plugin extends AppPlugin {
 					"and leaves that plugin untouched, so it stays a way back.</div>");
 				const acts = this._bar(screen, "<div></div>");
 				this._primary(acts, "Import " + n + " Rules", () => this._doImport(found), true);
+				return;
 			}
-			return;
 		}
 		if (s.clash === undefined) {
 			const found = await this._findAutoInit();
@@ -1654,7 +1659,14 @@ class Plugin extends AppPlugin {
 		// drill-in: the table has to stay on screen while you switch.
 		const guids = Object.keys(model.collections).filter((g) => g !== "*");
 		guids.sort((a, b) => this._collLabel(a, model).localeCompare(this._collLabel(b, model)));
-		if (!s.vSel || !model.collections[s.vSel]) s.vSel = guids[0] || null;
+		// Open on a collection that actually carries a rule of THIS mode. A
+		// collection can hold an entry for the other one and nothing here, so
+		// plain guids[0] could land Default Values on a collection with no
+		// default and an empty table.
+		if (!s.vSel || !model.collections[s.vSel]) {
+			s.vSel = guids.find((g) => this._modeCount(model.collections[g], mode) > 0)
+				|| guids[0] || null;
+		}
 
 		const line = document.createElement("div");
 		line.className = "gp-pickline";
@@ -1670,7 +1682,11 @@ class Plugin extends AppPlugin {
 		trigger.addEventListener("click", (e) => {
 			e.stopPropagation();
 			s.pop = s.pop === "coll" ? null : "coll";
-			s.popAdd = false; s.popQ = ""; s.popActive = 0;
+			// With no rule sets yet there is nothing to switch BETWEEN, so the
+			// picker opens straight into adding one rather than on an empty list
+			// under a "Nothing matches" line.
+			s.popAdd = !guids.length;
+			s.popQ = ""; s.popActive = 0;
 			this._render();
 		});
 		anchor.appendChild(trigger);
@@ -1732,14 +1748,23 @@ class Plugin extends AppPlugin {
 		const list = document.createElement("div");
 		list.className = "gp-poplist";
 		const q = s.popQ || "";
+		// BOTH lists are mode-aware, because a collection can hold a rule set for
+		// the other mode and nothing at all for this one. Keyed on "has an entry"
+		// instead, Default Values listed all 20 collections that only inherit,
+		// each with a 0 beside it, and Add offered none of them because they
+		// already had an entry — so a collection that inherits could never be
+		// given a default. The main list is what HAS a rule here, plus whatever
+		// is selected (a collection added a moment ago has none yet and must not
+		// vanish while you are filling it in). Add offers everything that has
+		// none here, whether or not it has one over on the other screen.
+		const has = (g) => this._modeCount(model.collections[g], mode) > 0;
 		const rows = s.popAdd
-			? (s.cols || []).filter((c) => this._isTarget(c) && !model.collections[c.guid])
-			: guids.map((g) => (s.cols || []).find((c) => c.guid === g) || { guid: g, name: this._collLabel(g, model) });
+			? (s.cols || []).filter((c) => this._isTarget(c) && !has(c.guid))
+			: guids.filter((g) => has(g) || g === s.vSel)
+				.map((g) => (s.cols || []).find((c) => c.guid === g) || { guid: g, name: this._collLabel(g, model) });
 
-		let shown = 0;
-		for (const c of rows) {
-			if (this._matchScore(c.name || "", q) <= 0) continue;
-			shown++;
+		const visible = rows.filter((c) => this._matchScore(c.name || "", q) > 0);
+		const rowFor = (c) => {
 			const b = document.createElement("button");
 			b.className = "gp-poprow" + (!s.popAdd && c.guid === s.vSel ? " is-on" : "");
 			const excluded = model.blocklist.indexOf(c.guid) > -1;
@@ -1760,7 +1785,10 @@ class Plugin extends AppPlugin {
 			if (excluded && s.popAdd) b.classList.add("is-off");
 			else {
 				b.addEventListener("click", () => {
-					if (s.popAdd) {
+					// Only mint an entry that is not there. A collection offered
+					// here may already hold the OTHER mode's rules, and assigning
+					// a fresh {fields:{}} over it would wipe them.
+					if (s.popAdd && !model.collections[c.guid]) {
 						model.collections[c.guid] = { name: c.name, fields: {} };
 						this._dirty();
 					}
@@ -1769,11 +1797,22 @@ class Plugin extends AppPlugin {
 					this._render();
 				});
 			}
-			list.appendChild(b);
+			return b;
+		};
+
+		// The list IS the answer now, so it gets a title rather than two bands.
+		if (!s.popAdd && visible.length) {
+			this._add(list, '<div class="gp-caps-s gp-popgroup">' +
+				(mode === "inherit" ? "INHERITING" : "WITH A DEFAULT") +
+				" \u00b7 " + visible.filter((c) => has(c.guid)).length + "</div>");
 		}
-		if (!shown) {
-			this._add(list, '<div class="gp-popempty">' +
-				(s.popAdd ? "Every collection already has a rule set." : "Nothing matches.") + "</div>");
+		for (const c of visible) list.appendChild(rowFor(c));
+		if (!visible.length) {
+			this._add(list, '<div class="gp-popempty">' + (q ? "Nothing matches."
+				: s.popAdd
+					? "Every collection already has one."
+					: "No collection has " + (mode === "inherit" ? "an inherit rule" : "a default") +
+					  " yet. Use + Add a Collection below.") + "</div>");
 		}
 		pop.appendChild(list);
 		this._add(pop, '<div class="gp-poprule"></div>');
@@ -4589,6 +4628,10 @@ class Plugin extends AppPlugin {
 .gp-poprow.is-off { color: var(--gp-text-dim); cursor: not-allowed; }
 .gp-poprow.is-off:hover { background: transparent; }
 .gp-popcount { font-size: 11px; line-height: 14px; color: var(--gp-text-dim); white-space: nowrap; }
+/* A group break inside a popover list. First one sits flush; the rest get
+   air above so the two bands read apart. */
+.gp-poplist .gp-popgroup { padding: 2px 12px 4px; }
+.gp-poplist .gp-popgroup ~ .gp-popgroup { padding-top: 10px; }
 /* Amber, not red: excluding never deletes a rule, it only stops it firing. */
 .gp-popwarn { font-size: 11px; line-height: 14px; color: #c9a227; white-space: nowrap; }
 .gp-popempty { padding: 10px 12px; font-size: 12.5px; line-height: 16px; color: var(--gp-text-dim); font-family: var(--gp-font); }

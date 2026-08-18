@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.2.1 — 2026-08-17
+
+- **Fixed: Default Values and Inherited Values were a dead end on a fresh install.** With no rules yet, the import screen replaced the real one whether or not there was anything to import, so a workspace that never had Auto-Init From Ancestor got a heading, one sentence and nothing else: no collection picker, no way to add one. Both screens were unreachable for every new user, which is what the first person to install 1.2.0 hit. The import is offered only when it has something to offer; otherwise the normal screen renders, with its own empty state. Reported by a user, and it was a real defect rather than a misunderstanding.
+- **Fixed: the collection picker listed the wrong collections, and Add offered none of the right ones.** Both lists keyed on "has a rule set" rather than "has a rule of THIS mode". A collection that only inherits still holds an entry, so Default Values listed all of them with a useless 0 beside each (14 of 27 in one real workspace), while Add filtered them out for already having an entry, leaving no way to give an inheriting collection a default at all. Both lists are mode-aware now, the list carries its count as a title, and the screen opens on a collection that actually has a rule of that mode instead of the alphabetical first.
+- **Fixed: adding a collection could wipe the other screen's rules.** Adding assigned a fresh empty entry over `collections[guid]`. Harmless while Add only ever offered collections with no entry; destructive the moment it correctly offered one holding the other mode's rules. It now only creates an entry that is absent.
+- **Fixed: the record cost popover on the Change screen opened at the far left of the window**, outside the dialog. Popover placement took its trigger from the first button inside the anchor, and that cell's visible trigger is a plain span, so it measured the popover's own footer link at the viewport origin.
+- With no collection carrying a rule yet, the picker opens straight into adding one rather than on an empty list.
+
 ## v1.2.0 — 2026-08-17
 
 The interface rebuilt to Parham's design file (`Global Properties Redesign/`).
