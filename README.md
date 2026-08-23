@@ -4,7 +4,7 @@ Global Properties is a [Thymer](https://thymer.com) plugin that does two things:
 
 Thymer's properties are defined per collection, so a "Status" you set up carefully in one place has to be rebuilt by hand everywhere else: the same type, the same options, the same colours, the same linked collection, every time. And a record you create always starts empty, however much the record you created it inside already knew.
 
-One dialog, five screens, split the way the work splits.
+One dialog, six screens, split the way the work splits.
 
 | PROPERTIES | |
 |---|---|
@@ -16,6 +16,7 @@ One dialog, five screens, split the way the work splits.
 |---|---|
 | **Inherited Values** | a new record fills itself in from the record you created it inside |
 | **Default Values** | a value every new record in a collection starts with |
+| **Fill From Title** | a page fills its own fields in from what its title says |
 
 Each screen has its own command in the Command Palette, all prefixed `Global Properties:`.
 
@@ -90,6 +91,43 @@ Turn on both of the first two and the value is tried first.
 A value every new record in a collection starts with. Inherited values win: a default only lands when nothing was inherited, including on records created from nowhere.
 
 Value pickers list a collection's records in the order Thymer itself lists them, following that collection's own record sort, so a status list reads the way it reads everywhere else in the app.
+
+### Fill From Title
+
+![Fill From Title](Assets/fill-from-title.png)
+
+Reads the title of the page you are on and proposes values for its fields. "Contact med Mamdooh om Dokumentär i Världen imorgon" knows the person, the company, the log type and the date. You tick what is right and press Fill; nothing already in a field changes unless you tick it.
+
+Four things become a proposal:
+
+- **A record whose name is in the title**, matched against the collection that field links to. Punctuation and spacing do not have to agree, so `Konst&Kulturakademin` finds *Konst & Kulturakademin*.
+- **An option whose label is in the title**, or one of your aliases for it.
+- **What a matched record itself points at**: the company a matched person works at, the habitat a matched company sits in. Records already linked on the page count as matches too, so a person you linked by hand still brings their company.
+- **A date written in the title**, read the way Thymer reads it. `imorgon`, `nästa fredag`, `2026-05-12`, `May 12 at 14:00`. A month or a year alone is never a date, so a page called "Chimney Yard Party 2026" keeps its own.
+
+One row per field. The chevron beside a value opens the other candidates, along with a search for anything the matcher never proposed, so a proposal that is close but wrong takes one click to correct. Multi-value fields add and never replace, and a single-value field that already holds something says what ticking it would displace.
+
+**Fits several fields** collects records that match a field which can link anything, where the record is certain and the field is the question. Pick the field and the row can be written.
+
+**On this page** lists what the fields already hold, behind a toggle: the place to fix a value that an earlier fill got wrong. Pick a different one, or strike it.
+
+Partial matches, single words out of a longer name, are proposed unticked and say so, because "Elin" is three people.
+
+#### Keyword Aliases
+
+![Keyword aliases](Assets/keyword-aliases.png)
+
+A word in a title that should select a value the record's own name would not match. `möte, samtal, avstämning` selects *Contact Log*; `KKA` selects *Konst & Kulturakademin*. Per collection, per field, per value, comma separated, matched whole and in any case. An alias is your rule, so a hit by alias comes ticked.
+
+#### Fill In Settings
+
+![Fill In Settings](Assets/fill-in-settings.png)
+
+**Autofill at creation** lets chosen fields fill themselves on every new page that is created with a title already in place, while the field is blank and only where the match is sure enough to be ticked on its own. A page created empty is left alone: a title matched while it is still being typed fills the wrong things. The third column says in words what each ticked field will put there.
+
+Fields that can link any record are left out of autofill and say so: searching the whole workspace on every new page is too slow. Run the command on the page instead.
+
+**Shortcut**: ⌘⇧G opens Fill From Title anywhere in Thymer. Click the key field and press new keys to change it.
 
 ## If you use Auto-Init From Ancestor
 

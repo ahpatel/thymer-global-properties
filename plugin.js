@@ -82,10 +82,13 @@ class Plugin extends AppPlugin {
 	// blocks Save.
 	_cmds = [];
 	_style = null;
+	_fillKw = null;
+	_onFillKey = null;
 	_ovl = null;
 	_state = null;
 	_pending = null;
 	_pendingRules = null;
+	_pendingKw = null;
 	_rulesCache = null;
 
 	onLoad() {
@@ -100,6 +103,23 @@ class Plugin extends AppPlugin {
 		(window.__gpAll || (window.__gpAll = {}))[this.getWorkspaceGuid()] = this;
 		this._injectStyle();
 		this._hookCreation();
+		// The Fill From Title chord. ⌘⇧G was verified free on the corrected
+		// 147-chord audit (⌘⇧F is the search panel; ⌥+letter would steal the
+		// editor's special characters). Changeable from the Fill screen; the
+		// user's choice lives in the same store as the aliases.
+		try { this._fillKw = this._loadKeywords(); } catch (e) { this._fillKw = null; }
+		this._onFillKey = (e) => {
+			if (this._ovl) return;                       // the dialog is open: its own keys rule
+			const sc = (this._fillKw && this._fillKw.shortcut) || Plugin.FILL_SHORTCUT_DEFAULT;
+			if (!sc || !e.key) return;
+			if (e.key.toLowerCase() !== sc.key) return;
+			if (e.metaKey !== !!sc.meta || e.shiftKey !== !!sc.shift ||
+				e.altKey !== !!sc.alt || e.ctrlKey !== !!sc.ctrl) return;
+			e.preventDefault();
+			e.stopPropagation();
+			this._open("fill");
+		};
+		window.addEventListener("keydown", this._onFillKey, true);
 		// One command per screen. Two commands were right when the plugin had
 		// two screens; with five, the palette is how you navigate and three of
 		// them were unreachable from it. Every icon below was probed against the
@@ -115,6 +135,7 @@ class Plugin extends AppPlugin {
 	onUnload() {
 		this._flushStore();
 		this._closeModal();
+		if (this._onFillKey) { window.removeEventListener("keydown", this._onFillKey, true); this._onFillKey = null; }
 		for (const c of this._cmds || []) { try { c.remove(); } catch (e) {} }
 		this._cmds = [];
 		if (this._style) { this._style.remove(); this._style = null; }
@@ -168,28 +189,52 @@ class Plugin extends AppPlugin {
 	}
 
 	async _flushStore() {
-		const next = this._pending, rules = this._pendingRules;
-		if (!next && !rules) return false;
+		const next = this._pending, rules = this._pendingRules, kw = this._pendingKw;
+		if (!next && !rules && !kw) return false;
 		this._pending = null;
 		this._pendingRules = null;
-		if (!next) {
-			const mineOnly = (await this.data.getAllGlobalPlugins() || [])
-				.find((p) => p.getGuid() === this.getGuid());
-			if (!mineOnly) return false;
-			const c = JSON.parse(JSON.stringify(this.getConfiguration()));
-			c.custom = Object.assign({}, c.custom || {}, { [Plugin.RULES_KEY]: rules });
-			return await mineOnly.saveConfiguration(c);
-		}
+		this._pendingKw = null;
 		const mine = (await this.data.getAllGlobalPlugins() || [])
 			.find((p) => p.getGuid() === this.getGuid());
 		if (!mine) return false;
 		const cfg = JSON.parse(JSON.stringify(this.getConfiguration()));
+		cfg.custom = Object.assign({}, cfg.custom || {});
 		// The config key stays `property_templates` even though the plugin is
 		// now called Global Properties: renaming it would orphan every template
 		// already saved. Same reason the localStorage key keeps its pt_ prefix.
-		cfg.custom = Object.assign({}, cfg.custom || {}, { property_templates: next });
+		if (next) cfg.custom.property_templates = next;
 		if (rules) cfg.custom[Plugin.RULES_KEY] = rules;
+		if (kw) cfg.custom[Plugin.KW_KEY] = kw;
 		return await mine.saveConfiguration(cfg);
+	}
+
+	/* Fill From Title keywords: per collection, per choice field, per option, a
+	 * list of words or phrases that select that option when found in a title
+	 * ("Möte" -> Contact Log). Same two-stage save as everything else here. */
+	static KW_KEY = "fill_keywords";
+	static KW_LS = "pt_fillkw_v1_";
+
+	_loadKeywords() {
+		let a = null, b = null;
+		try { a = (this.getConfiguration().custom || {})[Plugin.KW_KEY] || null; } catch (e) {}
+		try { b = JSON.parse(localStorage.getItem(Plugin.KW_LS + this.getWorkspaceGuid()) || "null"); } catch (e) {}
+		const empty = { rev: 0, map: {} };
+		a = a && a.map ? a : empty; b = b && b.map ? b : empty;
+		const win = (b.rev || 0) > (a.rev || 0) ? b : a;
+		// `auto` (colGuid -> [fieldIds] that fill themselves when a new record
+		// arrives WITH a title) and `shortcut` (the Fill From Title chord) rode
+		// in later, 1.3.0-dev.
+		return { rev: win.rev || 0, map: JSON.parse(JSON.stringify(win.map || {})),
+			auto: JSON.parse(JSON.stringify(win.auto || {})),
+			shortcut: win.shortcut ? JSON.parse(JSON.stringify(win.shortcut)) : null };
+	}
+
+	_stageKeywords(kw) {
+		kw.rev = Date.now();
+		this._pendingKw = kw;
+		this._fillKw = kw;                 // the shortcut listener reads this cache
+		try { localStorage.setItem(Plugin.KW_LS + this.getWorkspaceGuid(), JSON.stringify(kw)); } catch (e) {}
+		return kw;
 	}
 
 	// ══════════════════════════════════════════════════════════════════════
@@ -390,10 +435,15 @@ class Plugin extends AppPlugin {
 			const t = trigger.getBoundingClientRect();
 			const h = pop.offsetHeight * z, w = pop.offsetWidth * z;
 			const vw = window.innerWidth, vh = window.innerHeight;
-			let top = t.bottom + 4;
+			// BELOW the trigger, always: the design rules out flipping (§5), and
+			// a picker that jumped above its row covered the dialog's own header.
+			// When it does not fit, it keeps its place and scrolls instead.
+			const top = t.bottom + 4;
+			pop.style.maxHeight = "";
+			pop.style.overflowY = "";
 			if (top + h > vh - 12) {
-				const above = t.top - 4 - h;
-				top = above >= 12 ? above : Math.max(12, vh - 12 - h);
+				pop.style.maxHeight = (Math.max(160, vh - 12 - top) / z) + "px";
+				pop.style.overflowY = "auto";
 			}
 			const wanted = align === "right" ? t.right - w : t.left;
 			pop.style.left = (Math.max(12, Math.min(wanted, vw - 12 - w)) / z) + "px";
@@ -628,6 +678,10 @@ class Plugin extends AppPlugin {
 
 	async _open(screen) {
 		this._closeModal();
+		// The page the user is looking at, read BEFORE the overlay exists: Fill
+		// From Title acts on it, and the active panel is still the one under
+		// the caret at this point.
+		const fillTarget = this._fillTarget();
 		const cols = await this._collections();
 		const colNames = {};
 		for (const c of cols) colNames[c.guid] = c.name;
@@ -648,7 +702,9 @@ class Plugin extends AppPlugin {
 			clash: undefined, pendingField: null, busy: false,
 			changeName: null, changeSrcKey: null, changeSkip: new Set(),
 			changeConfirm: false, costOpen: null, costCache: {}, syncedNames: null,
-			rearSel: null, rearOrder: {}, rearQ: "", rearDirty: false };
+			rearSel: null, rearOrder: {}, rearQ: "", rearDirty: false,
+			fillTarget, fill: null, fillOff: new Set(), fillPick: {}, fillSel: {}, fillLast: {},
+			filledOpen: false, kw: null, kwDraft: null };
 
 		const ovl = document.createElement("div");
 		ovl.className = "gp-ovl";
@@ -673,7 +729,15 @@ class Plugin extends AppPlugin {
 		this._onDown = (e) => {
 			const s = this._state;
 			if (!s || !s.pop) return;
-			if (e.target && e.target.closest && e.target.closest(".gp-anchor")) return;
+			const tgt = e.target;
+			if (!tgt || !tgt.closest) return;
+			// Only the anchor that OWNS the open popover is safe ground; every
+			// row on the fill screens is an anchor, and treating them all as
+			// safe meant a click in another row closed nothing. A trigger is
+			// also let through: its own click handler switches the popover.
+			const a = tgt.closest(".gp-anchor");
+			if (a && a.querySelector(".gp-pop")) return;
+			if (tgt.closest(".gp-fchevbtn, .gp-ffieldpick, .gp-kaddbtn, .gp-trigger, .gp-dashed, .gp-costcell")) return;
 			s.pop = null; s.popAdd = false;
 			this._render();
 		};
@@ -697,6 +761,23 @@ class Plugin extends AppPlugin {
 		// dialog, so stopPropagation() in a child cannot protect that child:
 		// anything with its own Escape meaning has to be handled right here.
 		this._onKey = (e) => {
+			const st = this._state;
+			// Recording a new Fill shortcut swallows everything until a real
+			// chord (or Escape) arrives. It has to live HERE: this listener was
+			// registered first, so it is the one that sees Escape before the
+			// close-the-dialog branch below does.
+			if (st && st.shortcutCapture) {
+				e.preventDefault();
+				e.stopPropagation();
+				if (e.key === "Escape") { st.shortcutCapture = false; this._render(); return; }
+				if (["Shift", "Meta", "Alt", "Control"].indexOf(e.key) !== -1) return;
+				if (!e.metaKey && !e.ctrlKey && !e.altKey) return;   // a bare letter is typing, not a chord
+				st.scDraft = { key: e.key.toLowerCase(), meta: e.metaKey, shift: e.shiftKey,
+					alt: e.altKey, ctrl: e.ctrlKey };
+				st.shortcutCapture = false;
+				this._render();
+				return;
+			}
 			if (e.key !== "Escape") return;
 			e.preventDefault();
 			e.stopPropagation();
@@ -784,6 +865,7 @@ class Plugin extends AppPlugin {
 		{ screen: "rearrange", label: "Rearrange", icon: "ti-sort-ascending" },
 		{ screen: "values", label: "Inherited Values", icon: "ti-arrow-down" },
 		{ screen: "defaults", label: "Default Values", icon: "ti-flag" },
+		{ screen: "fill", label: "Fill From Title", icon: "ti-wand" },
 	];
 
 	static NAV = [
@@ -795,6 +877,7 @@ class Plugin extends AppPlugin {
 		{ group: "NEW RECORDS", items: [
 			{ id: "values", label: "Inherited Values" },
 			{ id: "defaults", label: "Default Values" },
+			{ id: "fill", label: "Fill From Title" },
 		] },
 	];
 
@@ -803,7 +886,8 @@ class Plugin extends AppPlugin {
 		if (!p || !s) return;
 		const screens = { apply: "_renderApply", manage: "_renderManage",
 			values: "_renderValues", defaults: "_renderDefaults", change: "_renderChange",
-			rearrange: "_renderRearrange" };
+			rearrange: "_renderRearrange", fill: "_renderFill", fillkw: "_renderFillKeywords",
+			fillauto: "_renderFillAuto" };
 		p.innerHTML = "";
 		// Two breakpoints, measured off the window rather than media queries: the
 		// modal is our own overlay, so usable width is the window minus its padding.
@@ -904,7 +988,8 @@ class Plugin extends AppPlugin {
 			first = false;
 			for (const it of g.items) {
 				const b = document.createElement("button");
-				const on = s.screen === it.id;
+				const on = s.screen === it.id ||
+					(it.id === "fill" && (s.screen === "fillkw" || s.screen === "fillauto"));
 				b.className = (narrow ? "gp-navtab" : "gp-navitem") + (on ? " is-on" : "");
 				const badge = this._navBadge(it.id);
 				b.innerHTML = "<span>" + this._esc(it.label) + "</span>" +
@@ -1098,13 +1183,17 @@ class Plugin extends AppPlugin {
 	}
 
 	_onRecordCreated(ev) {
+		if (!ev || !ev.source || !ev.source.isLocal) return;      // never react to a sync-in
+		const newGuid = ev.recordGuid;
+		if (!newGuid) return;
+		// Autofill rides the same event but is otherwise independent of the
+		// rules: it has its own opt-in, its own delay, and it must run even in
+		// a workspace with no rules at all.
+		this._scheduleAutofill(newGuid);
 		// No switch: rules exist, they apply. Nothing to configure, nothing to
 		// forget to turn back on.
 		const store = this._rulesCache || (this._rulesCache = this._loadRules());
 		if (!store.rules.length) return;
-		if (!ev || !ev.source || !ev.source.isLocal) return;      // never react to a sync-in
-		const newGuid = ev.recordGuid;
-		if (!newGuid) return;
 
 		let newCollection = null;
 		try { if (ev.getCollection) newCollection = ev.getCollection(); } catch (e) {}
@@ -1996,6 +2085,33 @@ class Plugin extends AppPlugin {
 	}
 
 	/** The value popover: the collection's OWN values for that field. */
+	/** A collection's records for a picker, loaded once per dialog and cached
+	 *  on the state. getAllRecords() is a PROMISE on a collection (synchronous
+	 *  on the data API). Returns "loading" until it is there. */
+	_loadRecCache(target) {
+		const s = this._state;
+		if (!s.recCache[target.guid]) {
+			s.recCache[target.guid] = "loading";
+			Promise.resolve(target.api.getAllRecords()).then((recs) => {
+				// The order THYMER lists this collection in, never alphabetical
+				// and never the raw store order either. See _hostSorted: the
+				// app sorts a collection's records by its own
+				// sidebar_record_sort_field_id/_dir, and its record-property
+				// picker then shows that array unsorted. Alphabetising turned a
+				// status list into Done, Dropped, In Backlog, In Progress, an
+				// order nobody arranged; the raw store order was no better.
+				s.recCache[target.guid] = this._hostSorted(recs || [], target)
+					// A record's own icon, which is what Thymer draws beside it.
+					// getIcon() returns null for records that never had one set;
+					// those fall back to the collection's icon.
+					.map((r) => ({ guid: r.guid, name: r.getName() || "(untitled)",
+						icon: (() => { try { return r.getIcon && r.getIcon(); } catch (e) { return null; } })() }));
+				if (this._state === s) this._render();
+			}).catch(() => { s.recCache[target.guid] = []; });
+		}
+		return s.recCache[target.guid];
+	}
+
 	_fixedPopover(field, guid, stored) {
 		const s = this._state;
 		const rule = stored.fields[field.id] || {};
@@ -2037,29 +2153,7 @@ class Plugin extends AppPlugin {
 		} else if (field.type === "record") {
 			const target = field.filter_colguid
 				? (s.cols || []).find((c) => c.guid === field.filter_colguid) : null;
-			if (target && !s.recCache[target.guid]) {
-				// getAllRecords() is a PROMISE on a collection (it is synchronous
-				// on the data API). Load once, cache, re-render.
-				s.recCache[target.guid] = "loading";
-				Promise.resolve(target.api.getAllRecords()).then((recs) => {
-					// The order THYMER lists this collection in, never alphabetical
-					// and never the raw store order either. See _hostSorted: the
-					// app sorts a collection's records by its own
-					// sidebar_record_sort_field_id/_dir, and its record-property
-					// picker then shows that array unsorted. Alphabetising turned a
-					// status list into Done, Dropped, In Backlog, In Progress, an
-					// order nobody arranged; the raw store order was no better.
-					s.recCache[target.guid] = this._hostSorted(recs || [], target)
-						// A record's own icon, which is what Thymer draws beside it.
-						// getIcon() returns null for records that never had one set;
-						// those fall back to the collection's icon.
-						.map((r) => ({ guid: r.guid, name: r.getName() || "(untitled)",
-							icon: (() => { try { return r.getIcon && r.getIcon(); } catch (e) { return null; } })() }))
-						.slice(0, 400);
-					if (this._state === s) this._render();
-				}).catch(() => { s.recCache[target.guid] = []; });
-			}
-			const cached = target ? s.recCache[target.guid] : null;
+			const cached = target ? this._loadRecCache(target) : null;
 			if (cached === "loading") opts.push({ label: "Loading…", pick: null });
 			else for (const r of (cached || [])) {
 				// Each record's OWN icon, mirroring what Thymer draws beside it.
@@ -2087,9 +2181,11 @@ class Plugin extends AppPlugin {
 		const q = s.popQ || "";
 		// Ranked the shared picker's way — prefix-first, `+` as an AND — unless
 		// the options carry an order of their own worth keeping.
-		const ranked = opts.length && opts[0].keepOrder
+		// The cache holds EVERY record so a search finds it; only what is
+		// drawn is capped (Habitats has 5,195).
+		const ranked = (opts.length && opts[0].keepOrder
 			? opts.filter((o) => this._matchScore(o.label, q) > 0)
-			: this._rankRows(opts, q, (o) => o.label);
+			: this._rankRows(opts, q, (o) => o.label)).slice(0, 400);
 		// "None" is how a default is removed, so it belongs in the same list
 		// rather than in a separate footer action, and it stays pinned at the top
 		// instead of being ranked in among real values.
@@ -3721,6 +3817,1587 @@ class Plugin extends AppPlugin {
 	}
 
 	// ══════════════════════════════════════════════════════════════════════
+	// Screen: Fill From Title — a page's properties, read out of its own title
+	// ══════════════════════════════════════════════════════════════════════
+
+	/* "1:1 with John Doe" should give a Meetings page attendees John Doe, the
+	 * company John works at, and type 1:1. This screen proposes exactly that,
+	 * from the title of the page you are on, and writes what you tick.
+	 *
+	 * COMMAND-INVOKED, NOT EVENT-DRIVEN. A page has no title when it is
+	 * created, so record.created is useless here, and record.updated would mean
+	 * debouncing a title as it is typed and fighting the edit. Running it as a
+	 * command on the page in front of you deletes the timing problem and earns
+	 * a preview.
+	 *
+	 * Three sources, in the order they are tried:
+	 *   choice  — an option label found in the title
+	 *   record  — a record NAME found in the title, scoped to the collection the
+	 *             field points at (only fields WITH a target collection: an
+	 *             unscoped one would mean loading the whole workspace, 1.1s on
+	 *             Parham's, and it is skipped, visibly)
+	 *   follow  — a record field with no direct hit takes the value another
+	 *             matched record holds in ITS field pointing at the same
+	 *             collection ("John Doe" -> John's company). Ticked only when
+	 *             there is exactly one candidate.
+	 *
+	 * The preview IS the safety story. A blank field with a match is a ticked
+	 * line. A multi-value field ADDS, so its lines are ticked even when the field
+	 * already holds something. A single-value field that already holds a
+	 * DIFFERENT value goes under ALSO FOUND, unticked, showing current -> found,
+	 * in amber because it replaces something that exists. A field that already
+	 * holds the match is not shown at all. No confirm tick: the ticks are the
+	 * consent, and every replace is one value on one record, ticked by hand.
+	 *
+	 * Matching is one regex per pool (every name as an alternative, longest
+	 * first), so a 5,000-name collection is one pass over the title, not 5,000.
+	 * Word boundaries are Unicode-aware because JS \b is ASCII-only and "Åsa"
+	 * would never match. Three characters minimum: 595 of 16,896 names here are
+	 * four or fewer, and "JD" / "mo" / "SL" fire on everything.
+	 *
+	 * Verified by replay against Parham's Logs (362 titles, six pools of 166 to
+	 * 5,195 names): every unit case, 0.9ms per title on the largest pool, 52ms to
+	 * compile all six once per open. */
+
+	static FILL_SHORTCUT_DEFAULT = { key: "g", meta: true, shift: true, alt: false, ctrl: false };
+
+	static _fillComboLabel(c) {
+		if (!c) return "none";
+		const parts = [];
+		if (c.ctrl) parts.push("\u2303");
+		if (c.alt) parts.push("\u2325");
+		if (c.meta) parts.push("\u2318");
+		if (c.shift) parts.push("\u21e7");
+		parts.push(c.key.length === 1 ? c.key.toUpperCase() : c.key);
+		return parts.join(" ");
+	}
+
+	static FILL_MIN_CHARS = 3;
+	static FILL_PARTIAL_MAX = 3;
+
+	static _fillEsc(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
+
+	/** Canonical form: lowercase, every run of non-letters/digits is ONE space.
+	 *  Title and names are compared in this space, so "Konst&Kulturakademin"
+	 *  and "Konst & Kulturakademin" are the same string and "1:1" is "1 1". The
+	 *  first user title that missed was exactly that ampersand. */
+	static _fillCanon(s) {
+		return String(s || "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+	}
+
+	static _fillIsUpper(w) { return !!w && w[0] !== w[0].toLowerCase() && w[0] === w[0].toUpperCase(); }
+
+	/** ONE regex per pool: canonical names as alternatives, longest first, so at
+	 *  any position the engine takes the longest name that fits ("John Doe"
+	 *  before "John") and the global scan moves past it so nothing overlaps.
+	 *  Also indexes the CAPITALISED words of every name for partial matching.
+	 *  names: [{ name, id, rec? }] */
+	static _fillCompilePool(names, loose) {
+		const byKey = new Map(), byWord = new Map();
+		for (const n of names || []) {
+			const name = String(n.name || "").trim();
+			if (name.length < Plugin.FILL_MIN_CHARS) continue;
+			const k = Plugin._fillCanon(name);
+			if (k.length < Plugin.FILL_MIN_CHARS) continue;
+			if (!byKey.has(k)) byKey.set(k, { name, items: [] });
+			byKey.get(k).items.push(n);
+			const seen = new Set();
+			for (const raw of name.split(/[^\p{L}\p{N}]+/u)) {
+				if (raw.length < Plugin.FILL_MIN_CHARS || (!loose && !Plugin._fillIsUpper(raw))) continue;
+				const w = raw.toLowerCase();
+				if (seen.has(w)) continue;
+				seen.add(w);
+				if (!byWord.has(w)) byWord.set(w, []);
+				byWord.get(w).push(n);
+			}
+		}
+		// Bigrams of every name's canonical words, for PHRASE matching: a run
+		// of title words that is most of a name ("Dokumentär i Världen" inside
+		// "Ansökan till Dokumentär i världen").
+		const byBigram = new Map();
+		for (const [k, v] of byKey) {
+			const w = k.split(" ");
+			v.words = w;
+			for (let i = 0; i + 1 < w.length; i++) {
+				const bg = w[i] + " " + w[i + 1];
+				if (!byBigram.has(bg)) byBigram.set(bg, []);
+				byBigram.get(bg).push({ key: k, at: i });
+			}
+		}
+		const keys = Array.from(byKey.keys()).sort((a, b) => b.length - a.length || a.localeCompare(b));
+		if (!keys.length) return null;
+		let re = null;
+		try {
+			re = new RegExp("(?<![\\p{L}\\p{N}])(?:" + keys.map(Plugin._fillEsc).join("|") +
+				")(?![\\p{L}\\p{N}])", "yu");
+		} catch (e) { return null; }
+		return { re, byKey, byWord, byBigram };
+	}
+
+	/** Every pool item whose whole name occurs in the title, in title order.
+	 *  Positions are in the canonical string.
+	 *
+	 *  At every word start the sticky regex yields the LONGEST name there, and
+	 *  the shorter names ending at inner word boundaries are looked up directly,
+	 *  so every name starting at that position is a candidate. Overlaps are then
+	 *  resolved longest first, and a nested match is dropped ONLY when it comes
+	 *  from the same collection as the one that claimed the span: "John" beside
+	 *  "John Doe" among people is the false positive this exists for, while
+	 *  "Dokumentär i Världen" (Applications) inside an Action titled "Möte om
+	 *  Dokumentär i Världen" is two real links, and the first user title that
+	 *  hit the workspace pool was exactly that. A scoped pool is one collection,
+	 *  so there nothing nested ever survives, as before. */
+	static _fillMatch(title, pool) {
+		const c = Plugin._fillCanon(title);
+		if (!c || !pool || !pool.re) return [];
+		const cands = [];
+		const add = (key, start) => {
+			const hit = pool.byKey.get(key);
+			if (!hit) return;
+			for (const it of hit.items) cands.push({ item: it, name: hit.name, start, end: start + key.length });
+		};
+		for (let i = 0; i < c.length; i++) {
+			if (i > 0 && c[i - 1] !== " ") continue;
+			pool.re.lastIndex = i;
+			const m = pool.re.exec(c);
+			if (!m) continue;
+			add(m[0], i);
+			for (let j = i + 1; j < i + m[0].length; j++) if (c[j] === " ") add(c.slice(i, j), i);
+		}
+		cands.sort((a, b) => (b.end - b.start) - (a.end - a.start) || a.start - b.start);
+		const taken = [], out = [];
+		for (const h of cands) {
+			const col = h.item.colName || "";
+			if (taken.some((t) => h.start < t.end && t.start < h.end &&
+				!(t.start === h.start && t.end === h.end) && (t.item.colName || "") === col)) continue;
+			taken.push(h);
+			out.push(h);
+		}
+		return out.sort((a, b) => a.start - b.start || (b.end - a.end));
+	}
+
+	/** Partial matches, two tiers, both weaker than a whole name so the caller
+	 *  never ticks them by default, and both capped: a word or phrase shared by
+	 *  more than FILL_PARTIAL_MAX records proposes nothing rather than a list.
+	 *
+	 *  PHRASE: 2+ consecutive title words equal to a consecutive run of a name's
+	 *  words covering at least half the name, one of them capitalised mid-title
+	 *  ("Dokumentär i Världen" -> "Ansökan till Dokumentär i världen"; not
+	 *  "Möte med", not "of the"). WORD: a capitalised title word (not the first, capitalised anyway)
+	 *  equal to a capitalised word of a name ("Elin" -> the three Elins).
+	 *  Measured on 362 real titles: 206 word suggestions, mostly right, against
+	 *  1,153 before the capitalisation rule, most of them "and", "med", "för".
+	 *  Positions are in the canonical string, same as _fillMatch's. */
+	static _fillPartial(title, pool, taken, loose) {
+		if (!title || !pool) return [];
+		const out = [], seen = new Set();
+		// Title words with their canonical positions: the canonical string is
+		// the letter runs joined by single spaces.
+		const words = [];
+		const wordsRe = /[\p{L}\p{N}]+/gu;
+		let m, cpos = 0;
+		while ((m = wordsRe.exec(title))) {
+			words.push({ raw: m[0], low: m[0].toLowerCase(), start: cpos, end: cpos + m[0].length });
+			cpos += m[0].length + 1;
+		}
+		// A span claimed by a whole-name match blocks a partial from the SAME
+		// collection only, like _fillMatch: the Habitat "Dokumentär" must not
+		// hide the Application "Ansökan till Dokumentär i världen".
+		const free = (a, b, it) => !(taken || []).some((t) => a < t.end && t.start < b &&
+			(t.item.colName || "") === (it.colName || ""));
+		// Phrase tier.
+		const phrases = new Map();          // phrase -> Map(itemId -> {item, name, word})
+		for (let i = 0; i + 1 < words.length && pool.byBigram; i++) {
+			const cands = pool.byBigram.get(words[i].low + " " + words[i + 1].low);
+			if (!cands) continue;
+			for (const c of cands) {
+				const v = pool.byKey.get(c.key), nw = v.words;
+				let L = 0;
+				while (i + L < words.length && c.at + L < nw.length && words[i + L].low === nw[c.at + L]) L++;
+				if (L < 2 || L * 2 < nw.length) continue;
+				// The same proper-noun signal as the word tier: some word of the
+				// run is capitalised in the title and is not its first word.
+				// Without it "Möte med" (2 of 3 words of "Möte med Polhemsgården")
+				// fires on every meeting.
+				if (!loose && !words.slice(i, i + L).some((w, x) => i + x > 0 && Plugin._fillIsUpper(w.raw))) continue;
+				const phrase = words.slice(i, i + L).map((w) => w.raw).join(" ");
+				for (const it of v.items) {
+					if (!free(words[i].start, words[i + L - 1].end, it)) continue;
+					if (!phrases.has(phrase)) phrases.set(phrase, new Map());
+					if (!phrases.get(phrase).has(it.id)) phrases.get(phrase).set(it.id, { item: it, name: v.name, word: phrase });
+				}
+			}
+		}
+		for (const group of phrases.values()) {
+			if (group.size > Plugin.FILL_PARTIAL_MAX) continue;
+			for (const h of group.values()) { if (seen.has(h.item.id)) continue; seen.add(h.item.id); out.push(h); }
+		}
+		// Word tier.
+		// LOOSE (choice options, a handful of labels): any position, any case;
+		// "Contact med Mamdooh" should offer Contact Log.
+		for (let k = loose ? 0 : 1; k < words.length; k++) {
+			const w = words[k];
+			if (w.raw.length < Plugin.FILL_MIN_CHARS || (!loose && !Plugin._fillIsUpper(w.raw))) continue;
+			// "Aug" in a title must not drag in records that happen to be NAMED
+			// like dates ("Wed, 16 Aug 2023"): a month or weekday is calendar
+			// vocabulary, not identity.
+			if (!loose && Plugin.FILL_DATE_WORDS.has(Plugin.FILL_SV[w.low] || w.low)) continue;
+			const items = pool.byWord.get(w.low);
+			if (!items || !items.length || items.length > Plugin.FILL_PARTIAL_MAX) continue;
+			for (const it of items) {
+				if (seen.has(it.id) || !free(w.start, w.end, it)) continue;
+				seen.add(it.id);
+				out.push({ item: it, name: it.name, word: w.raw });
+			}
+		}
+		return out;
+	}
+
+	/** Thymer's own date parser, so a date read out of a title agrees with what
+	 *  typing the same text into the field would give. Returns the value the
+	 *  property setter wants, or null. */
+	static _fillParseDate(text) {
+		try {
+			const dt = DateTime.parseDateTimeString(String(text || ""));
+			return dt ? { value: dt.value(), dt } : null;
+		} catch (e) { return null; }
+	}
+
+	/** A date's identity for "already holds it" and its label as Thymer shows
+	 *  it (its own dayjs, so the format agrees with the field). */
+	static _fillDateId(dt) {
+		try { const q = dt.getParts(); return [q.year, q.month, q.day, q.hours, q.minutes].map((x) => x == null ? "" : x).join("-"); }
+		catch (e) { return String(dt); }
+	}
+
+	static _fillDateLabel(dt) {
+		try {
+			const q = dt.getParts();
+			if (q.year == null || q.month == null || q.day == null) return String(dt);
+			const d = new Date(q.year, q.month, q.day, q.hours || 0, q.minutes || 0);
+			const timed = q.hours != null;
+			const thisYear = new Date().getFullYear() === q.year;
+			const fmt = "ddd MMM D" + (thisYear ? "" : " YYYY") + (timed ? " h:mm A" : "");
+			if (window.dayjs) return window.dayjs(d).format(fmt);
+			return d.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric",
+				year: thisYear ? undefined : "numeric" }).replace(/,/g, "");
+		} catch (e) { return String(dt); }
+	}
+
+	/* Swedish -> English before Thymer's parser, which is English-only. Only
+	 * the words that name a date; "kl" and the like are left alone. */
+	static FILL_SV = {
+		"idag": "today", "imorgon": "tomorrow", "igår": "yesterday", "nästa": "next", "kl": "at",
+		"måndag": "monday", "tisdag": "tuesday", "onsdag": "wednesday", "torsdag": "thursday",
+		"fredag": "friday", "lördag": "saturday", "söndag": "sunday",
+		"mån": "mon", "tis": "tue", "ons": "wed", "tors": "thu", "fre": "fri", "lör": "sat", "sön": "sun",
+		"januari": "january", "februari": "february", "mars": "march", "april": "april", "maj": "may",
+		"juni": "june", "juli": "july", "augusti": "august", "september": "september",
+		"oktober": "october", "november": "november", "december": "december",
+		"jan": "jan", "feb": "feb", "mar": "mar", "apr": "apr", "jun": "jun", "jul": "jul",
+		"aug": "aug", "sep": "sep", "sept": "sep", "okt": "oct", "nov": "nov", "dec": "dec",
+	};
+	static FILL_DATE_WORDS = new Set(["today", "tomorrow", "yesterday", "next", "monday", "tuesday",
+		"wednesday", "thursday", "friday", "saturday", "sunday", "mon", "tue", "wed", "thu", "fri",
+		"sat", "sun", "january", "february", "march", "april", "may", "june", "july", "august",
+		"september", "october", "november", "december", "jan", "feb", "mar", "apr", "jun", "jul",
+		"aug", "sep", "oct", "nov", "dec"]);
+	static FILL_MONTHS = new Set(["january", "february", "march", "april", "may", "june", "july",
+		"august", "september", "october", "november", "december", "jan", "feb", "mar", "apr",
+		"jun", "jul", "aug", "sep", "oct", "nov", "dec"]);
+
+	/** Dates written in a title. Windows of one to five words are offered to
+	 *  Thymer's parser, longest first, non-overlapping. A window qualifies only
+	 *  if it holds a date WORD (month, weekday, today/tomorrow) or a number
+	 *  with a date separator (2026-05-12, 18/8, 12.5.2026): a bare "13" or
+	 *  "2026" is never a date here ("Kian 13 år"), and a bare time never is.
+	 *  Command-invoked, so "imorgon" resolves against the day you run it, which
+	 *  is what you meant when you ran it. */
+	static _fillDates(title) {
+		const words = [];
+		const re = /[\p{L}\p{N}][\p{L}\p{N}:./-]*/gu;
+		let m;
+		while ((m = re.exec(title))) {
+			const raw = m[0].replace(/[:./-]+$/, "");        // "fredag:" is fredag
+			if (raw) words.push({ raw, start: m.index, end: m.index + raw.length });
+		}
+		const norm = (w) => { const l = w.toLowerCase(); return Plugin.FILL_SV[l] || l; };
+		const isSep = (w) => /^\d{1,4}[-./]\d{1,2}([-./]\d{1,4})?$/.test(w);
+		const isTime = (w) => /^\d{1,2}:\d{2}$/.test(w);
+		// Every word of a window must be date-ish, or "år kalas 2026-05-12" is
+		// offered as one date with the junk in its label. And the window must
+		// name a DAY, not just a month: "Aug 2026" in "Samtal med Cecilia Aug
+		// 2026 del 2" is part of a NAME, and the parser would happily resolve
+		// it to the 1st and propose replacing a correct date with it. Day
+		// evidence is a separator date (18/8), a relative or weekday word, or
+		// a month word WITH a standalone 1-31 beside it.
+		const dateish = (w) => Plugin.FILL_DATE_WORDS.has(norm(w.raw)) || isSep(w.raw) || isTime(w.raw) ||
+			/^\d{1,4}$/.test(w.raw) || norm(w.raw) === "at";
+		const qualifies = (ws) => ws.every(dateish) && (
+			ws.some((w) => isSep(w.raw)) ||
+			ws.some((w) => { const n = norm(w.raw);
+				return Plugin.FILL_DATE_WORDS.has(n) && !Plugin.FILL_MONTHS.has(n) && n !== "next"; }) ||
+			(ws.some((w) => Plugin.FILL_MONTHS.has(norm(w.raw))) &&
+				ws.some((w) => /^\d{1,2}$/.test(w.raw) && +w.raw >= 1 && +w.raw <= 31)));
+		const out = [], taken = [];
+		for (let L = 5; L >= 1; L--) {
+			for (let i = 0; i + L <= words.length; i++) {
+				const win = words.slice(i, i + L);
+				if (taken.some((t) => win[0].start < t.end && t.start < win[L - 1].end)) continue;
+				if (!qualifies(win)) continue;
+				const r = Plugin._fillParseDate(win.map((w) => norm(w.raw)).join(" "));
+				if (!r) continue;
+				let q = null; try { q = r.dt.getParts(); } catch (e) {}
+				if (!q || q.day == null || q.month == null) continue;   // year-only, time-only: no
+				taken.push({ start: win[0].start, end: win[L - 1].end });
+				out.push({ id: Plugin._fillDateId(r.dt), label: Plugin._fillDateLabel(r.dt), value: r.value,
+					text: win.map((w) => w.raw).join(" ") });
+			}
+		}
+		return out;
+	}
+
+	/** The page in front of the user, or null. Read from the active panel; the
+	 *  collection comes off the record's OWN `collection` property because
+	 *  panel.getActiveCollection() is null in the Journal. */
+	_fillTarget() {
+		try {
+			const panel = this.ui.getActivePanel();
+			const rec = panel && panel.getActiveRecord && panel.getActiveRecord();
+			if (!rec || !rec.guid) return null;
+			return { rec, guid: rec.guid, title: rec.getName() || "",
+				colGuid: this._recordCollectionGuid(rec) };
+		} catch (e) { return null; }
+	}
+
+	/** Build the proposal for the target. Async because the pools are the
+	 *  records of other collections, loaded on demand and only the ones this
+	 *  collection's fields point at. Cached on the STATE, so it is per open:
+	 *  a Person created a minute ago is in the next open's pool. */
+	async _fillCompute(ctx) {
+		// With a ctx this runs DETACHED (the autofill engine): no dialog, no
+		// render, and it must never touch or race this._state.
+		const s = ctx || this._state, t = s.fillTarget;
+		const live = () => (s.detached ? true : this._state === s);
+		const done = (fill) => { if (!live()) return; s.fill = fill; if (!s.detached) this._render(); };
+		if (!t) return done({ status: "notarget" });
+		const col = s.cols.find((c) => c.guid === t.colGuid) || null;
+		if (!col) return done({ status: "notarget" });
+		let cfg = null;
+		try { cfg = col.api.getConfiguration() || {}; } catch (e) { cfg = {}; }
+		const fields = (cfg.fields || []).filter((f) => f.active !== false && !f.read_only &&
+			!Plugin.SYSTEM_FIELD_IDS.has(f.id));
+		const recordFields = fields.filter((f) => f.type === "record" && f.filter_colguid);
+		const skipped = fields.filter((f) => f.type === "record" && !f.filter_colguid).map((f) => f.label);
+		const choiceFields = fields.filter((f) => f.type === "choice");
+		if (!recordFields.length && !choiceFields.length) return done({ status: "nofields", col, skipped });
+
+		// Load each target collection once. getAllRecords() is a PROMISE on a
+		// collection API (synchronous on the data API), hence the await.
+		const targets = {};
+		for (const f of recordFields) {
+			const g = f.filter_colguid;
+			if (targets[g]) continue;
+			const tc = s.cols.find((c) => c.guid === g);
+			if (!tc) { targets[g] = null; continue; }
+			let recs = [];
+			try { recs = (await tc.api.getAllRecords()) || []; } catch (e) { recs = []; }
+			const items = [];
+			for (const r of recs) {
+				if (!r || r.guid === t.guid) continue;
+				let name = ""; try { name = r.getName() || ""; } catch (e) {}
+				if (name) items.push({ name, id: r.guid, rec: r });
+			}
+			targets[g] = { col: tc, items, pool: Plugin._fillCompilePool(items) };
+		}
+		if (!live()) return;
+
+		const title = t.title;
+		if (!s.kw) s.kw = this._loadKeywords();
+		const kwFor = (fieldId) => ((s.kw.map[col.guid] || {})[fieldId]) || {};
+		// The user's keywords for a record field: "Kian" -> the Habitat "Kians
+		// Identity". Whole, any case, and a hit is a whole-name hit: ticked, and
+		// a source for following.
+		const kwHits = (f, seen) => {
+			const kws = kwFor(f.id), items = [];
+			for (const [guid, list] of Object.entries(kws)) for (const k of (list || [])) items.push({ name: k, id: guid });
+			if (!items.length) return [];
+			const out = [];
+			for (const h of Plugin._fillMatch(title, Plugin._fillCompilePool(items))) {
+				if (seen.has(h.item.id)) continue;
+				const rec = this.data.getRecord(h.item.id);
+				if (!rec) continue;                       // the record is gone
+				seen.add(h.item.id);
+				let name = ""; try { name = rec.getName() || ""; } catch (e) {}
+				out.push({ id: h.item.id, name: name || "a record", rec, via: null, word: h.name, strong: true, alias: true });
+			}
+			return out;
+		};
+		const direct = {};            // fieldId -> [{ id, name, rec, via:null }]
+		const partial = {};           // fieldId -> [{ id, name, rec, word }]
+		for (const f of recordFields) {
+			const tg = targets[f.filter_colguid];
+			const seen = new Set(), hits = kwHits(f, seen), parts = [];
+			const full = tg ? Plugin._fillMatch(title, tg.pool) : [];
+			for (const h of full) {
+				if (seen.has(h.item.id)) continue;
+				seen.add(h.item.id);
+				hits.push({ id: h.item.id, name: h.name, rec: h.item.rec, via: null });
+			}
+			for (const h of (tg ? Plugin._fillPartial(title, tg.pool, full) : [])) {
+				if (seen.has(h.item.id)) continue;
+				seen.add(h.item.id);
+				parts.push({ id: h.item.id, name: h.name, rec: h.item.rec, word: h.word });
+			}
+			direct[f.id] = hits;
+			partial[f.id] = parts;
+		}
+
+		const currentOf = (f) => this._fillCurrent(t.rec, f);
+
+		// Follow: a field with nothing of its own borrows from what WAS matched.
+		// The matched record's collection is the other field's target, so its
+		// config is one lookup away, and every record field on it pointing at
+		// this field's collection is a path. A follow is weaker evidence than a
+		// name in the title, so into a field that already holds something it is
+		// only ever OFFERED (unticked); into an empty field it is ticked when it
+		// is unique and comes from a whole-name hit. A blank Company on "1:1
+		// with John Doe" is the case it exists for; "Mamdooh" on a page whose
+		// Company is already set still gets his school offered.
+		const follow = {};            // fieldId -> [{ id, name, via, weak }]
+		for (const f of recordFields) {
+			if (direct[f.id].length) continue;
+			const filled = currentOf(f).length > 0;
+			const cands = new Map();
+			for (const other of recordFields) {
+				if (other.id === f.id) continue;
+				const tg = targets[other.filter_colguid];
+				if (!tg) continue;
+				let ocfg = null;
+				try { ocfg = tg.col.api.getConfiguration() || {}; } catch (e) { continue; }
+				const paths = (ocfg.fields || []).filter((of) => of.active !== false &&
+					of.type === "record" && of.filter_colguid === f.filter_colguid);
+				if (!paths.length) continue;
+				// From whole-name hits AND from partial ones: "Mamdooh" alone is
+				// enough to look up Mamdooh Afdile's company, but a follow from a
+				// partial inherits its weakness and starts unticked.
+				const sources = direct[other.id].map((h) => ({ h, weak: false }))
+					.concat((partial[other.id] || []).map((h) => ({ h, weak: true })));
+				// ...and from records ALREADY LINKED on the page, into EMPTY
+				// fields only: Elin sitting in Related People is surer evidence
+				// than her name in a title, and her company belongs on the page
+				// whether or not the title says her name again. This was the
+				// recurring "why is the company not offered" report. Into a
+				// filled field an anchor proposes nothing, or every linked
+				// person would drag their whole Habitat list onto every page.
+				if (!filled) {
+					for (const c of currentOf(other)) {
+						const arec = this.data.getRecord(c.id);
+						if (arec) sources.push({ h: { name: c.name, rec: arec }, weak: false });
+					}
+				}
+				for (const src of sources) {
+					const hit = src.h;
+					for (const path of paths) {
+						let linked = [];
+						try {
+							const p = hit.rec.prop(path.id);
+							linked = p ? (p.linkedRecords ? p.linkedRecords()
+								: (p.linkedRecord() ? [p.linkedRecord()] : [])) : [];
+						} catch (e) { linked = []; }
+						for (const lr of (linked || [])) {
+							if (!lr || !lr.guid) continue;
+							if (cands.has(lr.guid)) { if (!src.weak && !filled) cands.get(lr.guid).weak = false; continue; }
+							let name = ""; try { name = lr.getName() || ""; } catch (e) {}
+							if (name) cands.set(lr.guid, { id: lr.guid, name, via: hit.name, weak: src.weak || filled });
+						}
+					}
+				}
+			}
+			follow[f.id] = Array.from(cands.values());
+		}
+
+		// Choice options: same matcher over the active labels.
+		// Choice options: the user's KEYWORDS first (whole, ticked), then the
+		// label itself, then a word of the label (ticked only when it is the
+		// one thing that word could mean here).
+		const choiceHits = {};
+		for (const f of choiceFields) {
+			const active = (f.choices || []).filter((c) => c.active !== false && c.label);
+			const labelOf = (id) => { const c = active.find((x) => x.id === id); return c ? c.label : ""; };
+			const seen = new Set(), hits = [];
+			const kws = kwFor(f.id);
+			const kwItems = [];
+			for (const c of active) for (const k of (kws[c.id] || [])) kwItems.push({ name: k, id: c.id });
+			const kwPool = kwItems.length ? Plugin._fillCompilePool(kwItems) : null;
+			for (const h of (kwPool ? Plugin._fillMatch(title, kwPool) : [])) {
+				if (seen.has(h.item.id)) continue;
+				seen.add(h.item.id);
+				hits.push({ id: h.item.id, name: labelOf(h.item.id), word: h.name, strong: true, alias: true });
+			}
+			const opts = active.map((c) => ({ name: c.label, id: c.id }));
+			const pool = Plugin._fillCompilePool(opts, true);
+			const full = Plugin._fillMatch(title, pool);
+			for (const h of full) {
+				if (seen.has(h.item.id)) continue;
+				seen.add(h.item.id);
+				hits.push({ id: h.item.id, name: h.name });
+			}
+			const parts = Plugin._fillPartial(title, pool, full, true).filter((h) => !seen.has(h.item.id));
+			for (const h of parts) {
+				if (seen.has(h.item.id)) continue;
+				seen.add(h.item.id);
+				hits.push({ id: h.item.id, name: h.name, word: h.word, strong: parts.length === 1 && !hits.length });
+			}
+			choiceHits[f.id] = hits;
+		}
+
+		// Dates written in the title, for the datetime fields.
+		const dateFields = fields.filter((f) => f.type === "datetime");
+		const dates = dateFields.length ? Plugin._fillDates(title) : [];
+
+		// Now against what the page already holds. Agrees -> hidden. Multi ->
+		// add. Single and empty -> fill. Single and different -> replace.
+		const lines = [];
+		const push = (f, kind, hits, viaAmbiguous) => this._fillPush(lines, t.rec, f, kind, hits, viaAmbiguous);
+		for (const f of recordFields) {
+			const parts = partial[f.id] || [];
+			if (direct[f.id].length) {
+				push(f, "record", direct[f.id], false);
+				push(f, "record", parts, false);
+				continue;
+			}
+			// A follow candidate that is ALSO a partial match is the one line on
+			// the page with two independent signals ("Elin", and the Elin who
+			// works at the matched company): one line, ticked. The other Elins
+			// stay as unticked partials.
+			const fl = follow[f.id] || [];
+			const partById = new Map(parts.map((h) => [h.id, h]));
+			const merged = fl.map((h) => partById.has(h.id)
+				? Object.assign({}, h, { word: partById.get(h.id).word, strong: !h.weak }) : h);
+			const followIds = new Set(fl.map((h) => h.id));
+			if (merged.length) push(f, "record", merged, fl.filter((h) => !h.weak).length > 1);
+			push(f, "record", parts.filter((h) => !followIds.has(h.id)), false);
+		}
+		for (const f of choiceFields) push(f, "choice", choiceHits[f.id], false);
+		// One date field gets a found date ticked; several get it offered.
+		for (const f of dateFields) {
+			push(f, "date", dates.map((d) => ({ id: d.id, name: d.label, word: d.text,
+				value: d.value, weak: dateFields.length > 1 || dates.length > 1, dateHit: true })), false);
+		}
+
+		// The order the page shows its properties in: page_field_ids first,
+		// then the rest of the schema. Log Date sits at the top of a Log, so it
+		// sits at the top here.
+		const order = (cfg.page_field_ids || []).slice();
+		for (const f of (cfg.fields || [])) if (order.indexOf(f.id) === -1) order.push(f.id);
+		const rank = (id) => { const i = order.indexOf(id); return i === -1 ? 9999 : i; };
+		lines.forEach((l, i) => { l._i = i; });
+		lines.sort((a, b) => rank(a.fieldId) - rank(b.fieldId) || a._i - b._i);
+		const unscoped = fields.filter((f) => f.type === "record" && !f.filter_colguid);
+		for (const f of unscoped) {
+			const hits = kwHits(f, new Set());
+			if (hits.length) push(f, "record", hits, false);
+		}
+		lines.forEach((l, i) => { l._i = i; });
+		lines.sort((a, b) => rank(a.fieldId) - rank(b.fieldId) || a._i - b._i);
+
+		// What the page ALREADY holds, one line per value, so a fill that
+		// guessed wrong can be corrected from the same panel: swap a value or
+		// strike it. Dates stay out (fixing a date is one click in Thymer's
+		// own field); nothing here changes unless its line is ticked.
+		const editable = recordFields.concat(unscoped, choiceFields)
+			.sort((a, b) => rank(a.id) - rank(b.id));
+		for (const f of editable) {
+			for (const c of currentOf(f)) {
+				lines.push({ key: "edit:" + f.id + ":" + c.id, edit: true, fieldId: f.id, field: f,
+					kind: f.type === "choice" ? "choice" : "record",
+					editOf: c.id, editName: c.name, id: null, name: null, removed: false,
+					mode: "edit", current: [] });
+			}
+		}
+		const hasChoice = choiceFields.length > 0 || recordFields.length > 0 || unscoped.length > 0;
+		done({ status: "ready", col, lines, skipped, unscoped, hasChoice, choiceFields, recordFields,
+			dateFields,
+			wsStatus: (unscoped.length && !s.detached) ? "loading" : "none",
+			loaded: Object.values(targets).filter(Boolean).map((x) => x.col.name) });
+		if (unscoped.length && !s.detached) setTimeout(() => this._fillComputeWorkspace(s), 0);
+	}
+
+	/** What the page already holds in one field, as [{ id, name }]. */
+	_fillCurrent(rec, f) {
+		try {
+			const p = rec.prop(f.id);
+			if (!p) return [];
+			if (f.type === "datetime") {
+				const arr = (f.many && p.datetimes) ? (p.datetimes() || []) : (p.datetime() ? [p.datetime()] : []);
+				return arr.filter(Boolean).map((d) => ({ id: Plugin._fillDateId(d), name: Plugin._fillDateLabel(d) }));
+			}
+			if (f.type === "choice") {
+				const ids = p.selectedChoices ? (p.selectedChoices() || []) : [];
+				const label = (id) => { const c = (f.choices || []).find((x) => x.id === id); return c ? c.label : String(id); };
+				return ids.map((id) => ({ id: typeof id === "object" ? id.id : id, name: label(typeof id === "object" ? id.id : id) }));
+			}
+			const rs = p.linkedRecords ? (p.linkedRecords() || []) : (p.linkedRecord() ? [p.linkedRecord()] : []);
+			return rs.filter((r) => r && r.guid).map((r) => { let n = ""; try { n = r.getName() || ""; } catch (e) {} return { id: r.guid, name: n || "a record" }; });
+		} catch (e) { return []; }
+	}
+
+	/** Turn hits on one field into preview lines. Agrees -> skipped. Multi ->
+	 *  add. Single and empty -> fill. Single and different -> replace. Ticked by
+	 *  default only when the evidence is a whole name (or two signals agree)
+	 *  and nothing is being replaced. */
+	_fillPush(lines, rec, f, kind, hits, viaAmbiguous) {
+		const cur = this._fillCurrent(rec, f);
+		const curIds = new Set(cur.map((c) => c.id));
+		for (const h of hits) {
+			if (curIds.has(h.id)) continue;
+			const mode = f.many ? "add" : (cur.length ? "replace" : "fill");
+			lines.push({ key: f.id + ":" + h.id, fieldId: f.id, field: f, kind, id: h.id, rec: h.rec || null,
+				name: h.name, via: h.via || null, word: h.word || null, colName: h.colName || null,
+				value: h.value, mode, current: cur, strong: !!h.strong, alias: !!h.alias, dateHit: !!h.dateHit,
+				defOn: mode !== "replace" && !h.weak &&
+					(h.strong || h.dateHit || (!(h.via && viaAmbiguous) && !h.word)) });
+		}
+	}
+
+	/** The unscoped record fields (no target collection) can link ANY record,
+	 *  so they are matched against the whole workspace: every collection
+	 *  loaded, one pool. 1.1s measured on 16,896 records, which is why it runs
+	 *  AFTER the scoped results are already on screen rather than before.
+	 *  A hit could belong to any of the unscoped fields, so it is offered under
+	 *  each of them and ticked only when there is exactly one such field. */
+	async _fillComputeWorkspace(s) {
+		const t = s.fillTarget, fill = s.fill;
+		if (!t || !fill || fill.status !== "ready") return;
+		const items = [];
+		for (const c of s.cols) {
+			if (this._state !== s) return;
+			let recs = [];
+			try { recs = (await c.api.getAllRecords()) || []; } catch (e) { recs = []; }
+			for (const r of recs) {
+				if (!r || r.guid === t.guid) continue;
+				let name = ""; try { name = r.getName() || ""; } catch (e) {}
+				if (name) items.push({ name, id: r.guid, colName: c.name, colGuid: c.guid });
+			}
+		}
+		if (this._state !== s || s.fill !== fill) return;
+		const pool = Plugin._fillCompilePool(items);
+		const full = Plugin._fillMatch(t.title, pool);
+		const seen = new Set(), hits = [];
+		for (const h of full) {
+			if (seen.has(h.item.id)) continue;
+			seen.add(h.item.id);
+			hits.push({ id: h.item.id, name: h.name, colName: h.item.colName, colGuid: h.item.colGuid,
+				weak: fill.unscoped.length > 1 });
+		}
+		for (const h of Plugin._fillPartial(t.title, pool, full)) {
+			if (seen.has(h.item.id)) continue;
+			seen.add(h.item.id);
+			hits.push({ id: h.item.id, name: h.name, colName: h.item.colName, colGuid: h.item.colGuid, word: h.word });
+		}
+		// One line per hit, carrying the unscoped fields as OPTIONS: the user
+		// picks which field it belongs in. Options that already hold the record
+		// are dropped; a hit every option already holds is not a line at all.
+		for (const h of hits) {
+			const options = fill.unscoped.filter((f) =>
+				!this._fillCurrent(t.rec, f).some((c) => c.id === h.id));
+			if (!options.length) continue;
+			fill.lines.push({ key: "ws:" + h.id, ws: true, kind: "record", id: h.id, name: h.name,
+				colName: h.colName, colGuid: h.colGuid || null, word: h.word || null, options,
+				defPick: (fill.unscoped.length === 1 && !h.word) ? options[0].id : null });
+		}
+		fill.wsStatus = "ready";
+		fill.wsCount = items.length;
+		fill.wsItems = items;
+		this._render();
+	}
+
+	/** Which field a line writes to: fixed for scoped lines, the user's pick
+	 *  (or the default) for workspace-wide ones. */
+	_fillPickOf(line) {
+		if (!line.ws) return line.fieldId;
+		const s = this._state;
+		return Object.prototype.hasOwnProperty.call(s.fillPick, line.key) ? s.fillPick[line.key] : line.defPick;
+	}
+
+	_fillFieldOf(line) {
+		if (!line.ws) return line.field;
+		const id = this._fillPickOf(line);
+		return id ? (line.options.find((f) => f.id === id) || null) : null;
+	}
+
+	/** Is this line going to be written? Three line kinds, three answers:
+	 *  a workspace-wide (loose) line once it has a field; an edit line once it
+	 *  carries a change and is not unticked; a proposal line when it is in its
+	 *  field's selection. */
+	_fillIsOn(line) {
+		const s = this._state;
+		if (line.ws) return !!this._fillPickOf(line);
+		if (line.edit) return !!(line.removed || line.id) && !s.fillOff.has(line.key);
+		const sel = s.fillSel[line.fieldId];
+		return !!sel && sel.has(line.key);
+	}
+
+	/** Proposals grouped per field, in page order (fill.lines is already
+	 *  sorted that way). One ROW per field on screen; the candidates live
+	 *  behind the chevron. */
+	_fillGroups() {
+		const s = this._state, out = [], by = new Map();
+		for (const l of s.fill.lines) {
+			if (l.ws || l.edit) continue;
+			if (!by.has(l.fieldId)) { const g = { field: l.field, fieldId: l.fieldId, cands: [] }; by.set(l.fieldId, g); out.push(g); }
+			by.get(l.fieldId).cands.push(l);
+		}
+		return out;
+	}
+
+	/** The default selection of a group: every candidate the matcher would
+	 *  tick, capped to one for a single-value field. */
+	_fillDefaultSel(g) {
+		let keys = g.cands.filter((l) => l.defOn).map((l) => l.key);
+		if (!g.field.many && keys.length > 1) keys = [keys[0]];
+		return new Set(keys);
+	}
+
+	_fillEnsureSel() {
+		const s = this._state;
+		for (const g of this._fillGroups()) if (!s.fillSel[g.fieldId]) s.fillSel[g.fieldId] = this._fillDefaultSel(g);
+	}
+
+	/** What a group shows: its selection, or, unticked, what ticking it would
+	 *  select (the last selection, else the default, else the first). */
+	_fillShown(g) {
+		const s = this._state, sel = s.fillSel[g.fieldId];
+		if (sel && sel.size) return g.cands.filter((l) => sel.has(l.key));
+		const last = s.fillLast[g.fieldId];
+		const keys = last && last.size ? last : this._fillDefaultSel(g);
+		const shown = g.cands.filter((l) => keys.has(l.key));
+		return shown.length ? shown : g.cands.slice(0, 1);
+	}
+
+	/** The row tick: off clears the selection (remembering it), on restores. */
+	_fillRowToggle(g) {
+		const s = this._state, sel = s.fillSel[g.fieldId];
+		if (sel && sel.size) { s.fillLast[g.fieldId] = new Set(sel); s.fillSel[g.fieldId] = new Set(); }
+		else s.fillSel[g.fieldId] = new Set(this._fillShown(g).map((l) => l.key));
+		this._fillExclusive(g.field, null);
+		s.pop = null;
+		this._render();
+	}
+
+	/** Pick a candidate in the picker: the one value of a single-value field,
+	 *  a member of a multi-value field's set. */
+	_fillPickCand(g, line) {
+		const s = this._state;
+		const sel = s.fillSel[g.fieldId] || (s.fillSel[g.fieldId] = new Set());
+		if (g.field.many) { if (sel.has(line.key)) sel.delete(line.key); else sel.add(line.key); }
+		else { sel.clear(); sel.add(line.key); }
+		this._fillExclusive(g.field, null);
+		if (!g.field.many) { s.pop = null; s.popQ = ""; }
+		this._render();
+	}
+
+	/** A record or option the matcher never proposed, chosen by hand from the
+	 *  picker's search: becomes a candidate and is selected. */
+	_fillAddCand(g, id, name) {
+		const s = this._state;
+		let line = g.cands.find((l) => l.id === id);
+		if (!line) {
+			const cur = this._fillCurrent(s.fillTarget.rec, g.field);
+			line = { key: g.fieldId + ":" + id, fieldId: g.fieldId, field: g.field, kind: g.field.type === "choice" ? "choice" : "record",
+				id, name, picked: true, mode: g.field.many ? "add" : (cur.length ? "replace" : "fill"), current: cur, defOn: false };
+			s.fill.lines.push(line);
+			g.cands.push(line);
+		}
+		this._fillPickCand(g, line);
+	}
+
+	/** A single-value field takes ONE value: when a line aimed at it comes on,
+	 *  every other line aimed at it (a loose line given that field, an edit
+	 *  line on it) goes off. */
+	_fillExclusive(field, keep) {
+		const s = this._state;
+		if (field.many) return;
+		const onNow = s.fill.lines.some((l) => !l.ws && !l.edit && l.fieldId === field.id && this._fillIsOn(l));
+		if (!onNow && !keep) return;
+		for (const o of s.fill.lines) {
+			if (o.key === keep || !this._fillIsOn(o) || this._fillPickOf(o) !== field.id) continue;
+			if (o.ws) s.fillPick[o.key] = null;
+			else if (o.edit) s.fillOff.add(o.key);
+			else if (keep) s.fillSel[field.id] = new Set();
+		}
+	}
+
+	/** Tick, untick, or pick a field for a loose or edit line. */
+	_fillToggle(line, pickId) {
+		const s = this._state;
+		if (line.ws) {
+			const cur = this._fillPickOf(line);
+			s.fillPick[line.key] = pickId ? (pickId === cur ? null : pickId) : (cur ? null : line.options[0].id);
+		} else if (line.edit) {
+			if (s.fillOff.has(line.key)) s.fillOff.delete(line.key); else s.fillOff.add(line.key);
+		}
+		const field = this._fillFieldOf(line);
+		if (this._fillIsOn(line) && field) this._fillExclusive(field, line.key);
+		s.pop = null;
+		this._render();
+	}
+
+	/** Swap an edit line's value by hand. */
+	_fillSwap(line, id, name) {
+		const s = this._state;
+		line.id = id; line.name = name; line.removed = false;
+		s.fillOff.delete(line.key);
+		this._fillExclusive(line.field, line.key);
+		s.pop = null; s.popQ = "";
+		this._render();
+	}
+
+	_fillPicked() {
+		const s = this._state;
+		return (s.fill && s.fill.status === "ready") ? s.fill.lines.filter((l) => this._fillIsOn(l)) : [];
+	}
+
+	/** The icon beside a proposed or held value: the record's own, else its
+	 *  collection's; an option's own if it has one. Resolved once per line. */
+	_fillIcon(line, id) {
+		const key = id || line.id;
+		if (line.iconHtml !== undefined && line.iconFor === key) return line.iconHtml;
+		let html = "";
+		try {
+			if (line.kind === "record") {
+				const rec = (line.rec && !id) ? line.rec : this.data.getRecord(key);
+				let own = null; try { own = rec && rec.getIcon && rec.getIcon(); } catch (e) {}
+				if (/^ti-/.test(own || "")) html = '<span class="gp-colicon ti ' + this._esc(own) + '"></span>';
+				else {
+					const g = line.colGuid || (line.field && line.field.filter_colguid) ||
+						(rec ? this._recordCollectionGuid(rec) : null);
+					if (g) html = this._colIconFor(g);
+				}
+			} else if (line.kind === "choice" && line.field) {
+				const c = (line.field.choices || []).find((x) => x.id === key);
+				if (c && /^ti-/.test(c.icon || "")) html = '<span class="gp-colicon ti ' + this._esc(c.icon) + '"></span>';
+			}
+		} catch (e) { html = ""; }
+		line.iconHtml = html; line.iconFor = key;
+		return html;
+	}
+
+	/** The reason line under a value, in the design's words. Amber when the
+	 *  evidence is partial or the write would displace something. */
+	_fillWhy(line) {
+		if (line.picked) return { text: "picked by hand", amber: false };
+		if (line.kind === "date") return { text: "from “" + line.word + "”", amber: false };
+		const partial = !!line.word && !line.strong && !line.dateHit && !line.alias;
+		const bits = [];
+		if (line.word && line.alias) bits.push("alias “" + line.word + "”");
+		else if (partial) bits.push("partial match on “" + line.word + "”");
+		else if (line.via) bits.push("via " + line.via);
+		else bits.push("in the title");
+		if (line.via && (line.word || partial)) bits.push("via " + line.via);
+		if (line.colName) bits.push("in " + line.colName);
+		return { text: bits.join(" · "), amber: partial };
+	}
+
+	// ── The three screens ─────────────────────────────────────────────────
+
+	/** A caps section label with its copy beneath, capped at 620px (§6.0). */
+	_fillSection(parent, label, copy, first) {
+		const d = document.createElement("div");
+		d.className = "gp-fsec" + (first ? " is-first" : "");
+		d.innerHTML = '<div class="gp-fcaps">' + this._esc(label) + "</div>" +
+			(copy ? '<div class="gp-fcopy">' + copy + "</div>" : "");
+		parent.appendChild(d);
+		return d;
+	}
+
+	/** The three-column grid every list here shares: 24px tick, 176px field,
+	 *  the rest. */
+	_fillGrid(parent, headers) {
+		const g = document.createElement("div");
+		g.className = "gp-fgrid";
+		if (headers) {
+			this._add(g, "<span></span>" + headers.map((h) => '<span class="gp-fcaps">' + h + "</span>").join("") +
+				'<div class="gp-frule"></div>');
+		}
+		parent.appendChild(g);
+		return g;
+	}
+
+	/** The tick cell: exactly the field cell's line box, so the box sits on
+	 *  the FIRST line of a row that may wrap (§6.0). */
+	_fillTick(grid, on, onClick, warn, idle) {
+		const b = document.createElement("button");
+		b.className = "gp-ftick" + (idle ? " is-idle" : "");
+		b.innerHTML = '<span class="gp-fbox' + (on ? " is-on" : "") + (warn ? " is-warn" : "") + '">' +
+			(on ? '<span class="ti ti-check"></span>' : "") + "</span>";
+		if (onClick && !idle) b.addEventListener("click", onClick);
+		grid.appendChild(b);
+		return b;
+	}
+
+	_fillChev() { return '<span class="gp-fchev">' + Plugin.CHEVRON + "</span>"; }
+
+	_renderFill(parent) {
+		const s = this._state;
+		const screen = this._screen(parent);
+		const head = this._padTop(screen);
+		this._add(head, '<div class="gp-h2">Fill From Title</div>' +
+			'<div class="gp-blurb gp-blurb-660 gp-fblurb">Reads the title of the page you are on and ' +
+			"proposes values for its fields: records whose name appears in it, options that do, " +
+			"and what a matched record itself points at. Ticked lines are written; nothing already " +
+			"in a field changes unless you tick it.</div>");
+		const body = this._padScroll(screen);
+		body.classList.add("gp-fbody");
+
+		if (!s.fill) { s.fill = { status: "loading" }; setTimeout(() => this._fillCompute(), 0); }
+		const fill = s.fill;
+		if (fill.status === "loading") {
+			this._add(body, '<div class="gp-emptycard">Reading the collections this page links to…</div>');
+			this._fillFooter(screen, []);
+			return;
+		}
+		if (fill.status === "notarget") {
+			this._add(body, '<div class="gp-emptycard">Open a page first, then run Fill From Title ' +
+				"from the command palette while you are on it.</div>");
+			this._fillFooter(screen, []);
+			return;
+		}
+		const t = s.fillTarget;
+		this._add(body, '<div class="gp-fband">' +
+			'<span class="gp-fbandtext">Found in the title of</span>' +
+			'<span class="gp-fbandprop">' + this._esc(t.title || "(untitled)") + "</span>" +
+			'<span class="gp-fbandtext">in</span>' +
+			'<span class="gp-fbandprop">' + this._esc(fill.col.name) + "</span></div>");
+		if (fill.status === "nofields") {
+			this._add(body, '<div class="gp-emptycard">Nothing here can be filled from a title: ' +
+				this._esc(fill.col.name) + " has no choice fields and no linked-record field " +
+				"limited to one collection.</div>");
+			this._fillFooter(screen, []);
+			return;
+		}
+		this._fillEnsureSel();
+		const groups = this._fillGroups();
+		const loose = fill.lines.filter((l) => l.ws);
+		const edits = fill.lines.filter((l) => l.edit);
+
+		if (!groups.length && !loose.length) {
+			this._add(body, '<div class="gp-emptycard">' + (fill.wsStatus === "loading"
+				? "Nothing in this title matches a record or an option in " + this._esc(fill.col.name) +
+				  "'s scoped fields yet; the rest of the workspace is still being searched"
+				: "Nothing in this title matches a record or an option in " + this._esc(fill.col.name) +
+				  "'s fields, beyond what the page already holds") + ".</div>");
+		}
+
+		// ── 1. Proposals: one row per field, candidates behind the chevron.
+		if (groups.length) {
+			const grid = this._fillGrid(body, ["FIELD", "VALUE"]);
+			for (const g of groups) {
+				const sel = s.fillSel[g.fieldId], on = !!(sel && sel.size);
+				const shown = this._fillShown(g);
+				const cur = this._fillCurrent(t.rec, g.field);
+				const replaces = on && !g.field.many && cur.length > 0;
+				const whys = [];
+				let amber = replaces;
+				for (const l of shown) { const w = this._fillWhy(l); if (whys.indexOf(w.text) === -1) whys.push(w.text); amber = amber || w.amber; }
+				let why = whys.join(" · ");
+				if (replaces) why += " · replaces " + cur.map((c) => c.name).join(", ");
+				else if (on && g.field.many && cur.length) why += " · adds";
+				this._fillTick(grid, on, () => this._fillRowToggle(g), replaces, false);
+				const fb = document.createElement("button");
+				fb.className = "gp-ffield" + (on ? "" : " is-dim");
+				fb.textContent = g.field.label;
+				fb.addEventListener("click", () => this._fillRowToggle(g));
+				grid.appendChild(fb);
+				const cell = document.createElement("div");
+				cell.className = "gp-fval gp-anchor is-prop";
+				cell.innerHTML = '<span class="gp-fvalcol"><span class="gp-fvalue' + (on ? "" : " is-dim") + '">' +
+					shown.map((l) => this._fillIcon(l) + this._esc(l.name)).join(", ") + '</span><span class="gp-fwhy' +
+					(amber ? " is-amber" : "") + '">' + this._esc(why) + "</span></span>";
+				if (shown.some((l) => l.kind !== "date")) {
+					const key = "alt:" + g.fieldId;
+					const chev = document.createElement("button");
+					chev.className = "gp-fchevbtn";
+					chev.innerHTML = Plugin.CHEVRON;
+					chev.addEventListener("click", (e) => { e.stopPropagation(); s.pop = s.pop === key ? null : key; s.popQ = ""; this._render(); });
+					cell.appendChild(chev);
+					if (s.pop === key) { const pop = this._fillCandPop(g, cur); cell.appendChild(pop); this._placePop(cell, pop, "left"); }
+				}
+				grid.appendChild(cell);
+			}
+		}
+
+		// ── 2. Fits several fields: the field is the choice.
+		if (loose.length) {
+			const sec = this._fillSection(body, "FITS SEVERAL FIELDS",
+				"These records fit more than one field on this page, so each needs a field before it can be written.", !groups.length);
+			for (const line of loose) {
+				const on = this._fillIsOn(line), pick = this._fillPickOf(line), field = this._fillFieldOf(line);
+				const grid = this._fillGrid(sec, null);
+				grid.classList.add("is-row");
+				this._fillTick(grid, on, () => this._fillToggle(line), false, false);
+				const fcell = document.createElement("div");
+				fcell.className = "gp-anchor";
+				const key = "field:" + line.key;
+				const fb = document.createElement("button");
+				fb.className = "gp-ffield gp-ffieldpick" + (field ? "" : " is-dim");
+				fb.innerHTML = "<span>" + this._esc(field ? field.label : "Pick a field") + "</span>" + this._fillChev();
+				fb.addEventListener("click", (e) => { e.stopPropagation(); s.pop = s.pop === key ? null : key; this._render(); });
+				fcell.appendChild(fb);
+				if (s.pop === key) {
+					const pop = document.createElement("div");
+					pop.className = "gp-pop gp-fpop gp-fpop-field";
+					pop.addEventListener("click", (e) => e.stopPropagation());
+					this._add(pop, '<div class="gp-fpopnote is-ruled">Which field should ' + this._esc(line.name) + " go in?</div>");
+					const list = document.createElement("div");
+					list.className = "gp-fpoplist";
+					for (const f of line.options) {
+						const held = this._fillCurrent(t.rec, f);
+						const b = document.createElement("button");
+						b.className = "gp-fpoprow" + (pick === f.id ? " is-on" : "");
+						b.innerHTML = "<span>" + this._esc(f.label) + '</span><span class="gp-fpopmeta">' +
+							this._esc(held.length ? held.map((c) => c.name).join(", ") : "empty") + "</span>";
+						b.addEventListener("click", () => this._fillToggle(line, f.id));
+						list.appendChild(b);
+					}
+					pop.appendChild(list);
+					fcell.appendChild(pop);
+					this._placePop(fcell, pop, "left");
+				}
+				grid.appendChild(fcell);
+				const why = this._fillWhy(line);
+				this._add(grid, '<div class="gp-fval"><span class="gp-fvalcol"><span class="gp-fvalue is-wrap">' +
+					this._fillIcon(line) + this._esc(line.name) + '</span><span class="gp-fwhy' + (why.amber ? " is-amber" : "") + '">' +
+					this._esc(why.text) + "</span></span></div>");
+			}
+		}
+
+		// ── 3. On this page, behind a toggle.
+		if (edits.length && s.filledOpen) {
+			const sec = this._fillSection(body, "ON THIS PAGE",
+				"What these fields already hold. Pick a different value to change one, or strike it.", !groups.length && !loose.length);
+			let lastField = null;
+			for (const line of edits) {
+				const changed = !!(line.removed || line.id), on = this._fillIsOn(line);
+				const grid = this._fillGrid(sec, null);
+				grid.classList.add("is-row");
+				this._fillTick(grid, on, () => this._fillToggle(line), !!line.removed, !changed);
+				const first = line.fieldId !== lastField; lastField = line.fieldId;
+				this._add(grid, '<span class="gp-ffield is-plain' + (on ? "" : " is-dim") + '">' + (first ? this._esc(line.field.label) : "") + "</span>");
+				const cell = document.createElement("div");
+				cell.className = "gp-fval gp-anchor";
+				const value = line.removed ? line.editName : (line.id ? line.name : line.editName);
+				const why = line.removed ? "removed" : (line.id ? "changes " + line.editName : "already on this page");
+				cell.innerHTML = '<span class="gp-fvalcol"><span class="gp-fvalue is-wrap' +
+					(on && !line.removed ? " is-teal" : "") + (line.removed ? " is-struck" : "") + '">' +
+					this._fillIcon(line, line.id || line.editOf) + this._esc(value) +
+					'</span><span class="gp-fwhy' + (on ? (line.removed ? " is-amber" : " is-teal") : "") + '">' + this._esc(why) + "</span></span>";
+				const key = "alt:" + line.key;
+				const chev = document.createElement("button");
+				chev.className = "gp-fchevbtn";
+				chev.innerHTML = Plugin.CHEVRON;
+				chev.addEventListener("click", (e) => { e.stopPropagation(); s.pop = s.pop === key ? null : key; s.popQ = ""; this._render(); });
+				cell.appendChild(chev);
+				const x = document.createElement("button");
+				x.className = "gp-fstrike";
+				x.textContent = "×";
+				x.setAttribute("data-gptip", line.removed ? "Keep this value" : "Remove this value");
+				x.addEventListener("click", () => {
+					line.removed = !line.removed;
+					if (line.removed) { line.id = null; line.name = null; }
+					s.fillOff.delete(line.key);
+					this._render();
+				});
+				cell.appendChild(x);
+				if (s.pop === key) {
+					const pop = this._fillSearchPop(line.field, line.kind, (id, name) => this._fillSwap(line, id, name), line.editOf, "on the page");
+					cell.appendChild(pop);
+					this._placePop(cell, pop, "left");
+				}
+				grid.appendChild(cell);
+			}
+		}
+		if (edits.length) {
+			const tog = document.createElement("button");
+			tog.className = "gp-ffilledtoggle";
+			tog.textContent = (s.filledOpen ? "Hide " : "Show ") + edits.length +
+				(edits.length === 1 ? " Value" : " Values") + " Already On This Page";
+			tog.addEventListener("click", () => { s.filledOpen = !s.filledOpen; s.pop = null; this._render(); });
+			body.appendChild(tog);
+		}
+		this._fillFooter(screen, this._fillPicked());
+	}
+
+	/** The candidates picker behind a proposal's chevron: a note when ticking
+	 *  would displace a value, the other matches, then a search for anything
+	 *  the matcher never proposed. */
+	_fillCandPop(g, cur) {
+		const s = this._state, sel = s.fillSel[g.fieldId] || new Set();
+		const pop = document.createElement("div");
+		pop.className = "gp-pop gp-fpop";
+		pop.addEventListener("click", (e) => e.stopPropagation());
+		this._add(pop, '<div class="gp-fpopnote">' +
+			(cur.length && !g.field.many ? "Ticking this replaces " + this._esc(cur.map((c) => c.name).join(", ")) + ". " : "") +
+			(g.cands.length > 1 ? "Other matches for " : "Matches for ") + this._esc(g.field.label) + ":</div>");
+		const list = document.createElement("div");
+		list.className = "gp-fpoplist";
+		for (const l of g.cands) {
+			const why = this._fillWhy(l);
+			const b = document.createElement("button");
+			b.className = "gp-fpoprow" + (sel.has(l.key) ? " is-on" : "");
+			b.innerHTML = '<span class="gp-fpoplabel">' + this._fillIcon(l) + "<span>" + this._esc(l.name) + '</span></span><span class="gp-fpopmeta">' + this._esc(why.text) + "</span>";
+			b.addEventListener("click", () => this._fillPickCand(g, l));
+			list.appendChild(b);
+		}
+		pop.appendChild(list);
+		// Search, below the matches: the fix for "close but wrong".
+		if (g.cands.some((l) => l.kind !== "date")) {
+			const more = this._fillSearchPop(g.field, g.field.type === "choice" ? "choice" : "record",
+				(id, name) => this._fillAddCand(g, id, name), null, null, true);
+			pop.appendChild(more);
+		}
+		return pop;
+	}
+
+	/** A search picker over a field's target collection (or the workspace
+	 *  pool for a field that links anywhere), or its options for a choice
+	 *  field. `bare` returns just the search + list, to nest under matches. */
+	_fillSearchPop(field, kind, onPick, markId, markText, bare) {
+		const s = this._state, fill = s.fill;
+		const pop = document.createElement("div");
+		pop.className = bare ? "gp-fpopmore" : "gp-pop gp-fpop";
+		if (!bare) pop.addEventListener("click", (e) => e.stopPropagation());
+		let opts = [], loading = false, isWs = false;
+		if (kind === "choice") {
+			opts = (field.choices || []).filter((c) => c.active !== false && c.label).map((c) => ({ label: c.label, guid: c.id }));
+		} else {
+			const target = field.filter_colguid ? (s.cols || []).find((c) => c.guid === field.filter_colguid) : null;
+			if (target) {
+				const cached = this._loadRecCache(target);
+				if (cached === "loading") loading = true;
+				else opts = (cached || []).map((r) => ({ label: r.name, guid: r.guid,
+					// Each record's OWN icon, as Thymer draws it; the collection's
+					// when it never had one.
+					icon: /^ti-/.test(r.icon || "") ? '<span class="gp-colicon ti ' + this._esc(r.icon) + '"></span>' : this._colIcon(target) }));
+			} else if (fill.wsStatus !== "ready") loading = true;
+			else { isWs = true; opts = (fill.wsItems || []).map((it) => ({ label: it.name, guid: it.id, meta: it.colName,
+				icon: it.colGuid ? this._colIconFor(it.colGuid) : "" })); }
+		}
+		const w = document.createElement("div");
+		w.className = "gp-fpopsearch";
+		this._popSearch(w, kind === "choice" ? "Search options…" : (isWs ? "Search the workspace…" : "Search records…"),
+			s.popQ, (v) => { s.popQ = v; this._render(); });
+		pop.appendChild(w);
+		const list = document.createElement("div");
+		list.className = "gp-fpoplist";
+		const q = s.popQ || "";
+		if (loading) this._add(list, '<div class="gp-fpopempty">Loading…</div>');
+		else {
+			const ranked = (isWs && !q) ? [] : this._rankRows(opts, q, (o) => o.label).slice(0, 60);
+			for (const o of ranked) {
+				const b = document.createElement("button");
+				b.className = "gp-fpoprow" + (o.guid === markId ? " is-on" : "");
+				b.innerHTML = '<span class="gp-fpoplabel">' + (o.icon || "") + "<span>" + this._esc(o.label) + "</span></span>" +
+					'<span class="gp-fpopmeta">' + this._esc(o.guid === markId ? (markText || "") : (o.meta || "")) + "</span>";
+				b.addEventListener("click", () => onPick(o.guid, o.label));
+				list.appendChild(b);
+			}
+			if (!ranked.length) this._add(list, '<div class="gp-fpopempty">' +
+				(isWs && !q ? "Type to search every record." : (bare && !q ? "Type to search for another." : "Nothing matches.")) + "</div>");
+		}
+		pop.appendChild(list);
+		return pop;
+	}
+
+	/** Footer: quiet accent links at the left, the count and the write at
+	 *  the right (the design's layout, not the shared _bar's). */
+	_fillFooter(screen, picked) {
+		const s = this._state;
+		const fields = new Set(picked.map((l) => this._fillPickOf(l))).size;
+		const bar = document.createElement("div");
+		bar.className = "gp-footbar gp-ffoot";
+		const left = document.createElement("div");
+		left.className = "gp-ffootlinks";
+		if (s.fill && s.fill.status === "ready" && s.fill.hasChoice) {
+			const kw = s.kw || this._loadKeywords();
+			const kwb = document.createElement("button");
+			kwb.className = "gp-flink";
+			kwb.textContent = "Keyword Aliases";
+			kwb.addEventListener("click", () => {
+				s.kwDraft = JSON.parse(JSON.stringify((kw.map[s.fill.col.guid]) || {}));
+				s.pop = null; s.screen = "fillkw"; this._render();
+			});
+			left.appendChild(kwb);
+			const stb = document.createElement("button");
+			stb.className = "gp-flink";
+			stb.textContent = "Settings";
+			stb.addEventListener("click", () => {
+				s.autoDraft = ((kw.auto || {})[s.fill.col.guid] || []).slice();
+				s.scDraft = null; s.shortcutCapture = false;
+				s.pop = null; s.screen = "fillauto"; this._render();
+			});
+			left.appendChild(stb);
+		}
+		bar.appendChild(left);
+		const right = document.createElement("div");
+		right.className = "gp-footacts";
+		if (picked.length) this._add(right, '<span class="gp-ffootnote">' + picked.length + (picked.length === 1 ? " value" : " values") + " ticked</span>");
+		this._quiet(right, "Cancel", () => this._closeModal());
+		this._primary(right, fields ? "Fill " + fields + (fields === 1 ? " Field" : " Fields") : "Fill",
+			() => this._doFill(picked), fields > 0);
+		bar.appendChild(right);
+		screen.appendChild(bar);
+	}
+
+	/** Keyword Aliases: VALUE · ALIASES, grouped by field with a count; no
+	 *  tick gutter because nothing here ticks (§6.0). */
+	_renderFillKeywords(parent) {
+		const s = this._state, fill = s.fill, col = fill.col;
+		const screen = this._screen(parent);
+		const head = this._padTop(screen);
+		this._add(head, '<div class="gp-h2">Keyword Aliases for ' + this._esc(col.name) + "</div>" +
+			'<div class="gp-blurb gp-blurb-660">Words or phrases that, found in a title, select a value. ' +
+			"Separate several with commas. Matched whole and in any case, so “meeting” also finds " +
+			"“Meeting”; an alias that is part of a longer word does not fire.</div>");
+		const body = this._padScroll(screen);
+		body.classList.add("gp-fbody");
+		const draft = s.kwDraft || (s.kwDraft = {});
+		// Typing must NOT re-render: that would replace the input under the
+		// caret. So the Save button, whose enabled state is decided once when
+		// this screen is drawn, is held here and switched on directly by the
+		// input handler. Without this it stayed dead however much you typed,
+		// and an edited alias could not be saved at all.
+		let saveBtn = null;
+		const markDirty = () => { s.kwDirty = true; if (saveBtn) saveBtn.disabled = false; };
+		this._add(body, '<div class="gp-kgrid is-head"><span class="gp-fcaps">VALUE</span><span class="gp-fcaps">ALIASES</span><div class="gp-frule"></div></div>');
+		const order = (() => { let cfg = {}; try { cfg = col.api.getConfiguration() || {}; } catch (e) {}
+			const o = (cfg.page_field_ids || []).slice(); for (const f of (cfg.fields || [])) if (o.indexOf(f.id) === -1) o.push(f.id); return o; })();
+		const all = fill.choiceFields.concat(fill.recordFields, fill.unscoped)
+			.sort((a, b) => order.indexOf(a.id) - order.indexOf(b.id));
+		const input = (fieldId, valueId, host) => {
+			const inp = document.createElement("input");
+			const has = ((draft[fieldId] || {})[valueId] || []).length > 0;
+			inp.className = "gp-kinput" + (has ? " has-words" : "");
+			inp.type = "text";
+			inp.placeholder = "e.g. meeting, call";
+			inp.value = ((draft[fieldId] || {})[valueId] || []).join(", ");
+			inp.addEventListener("keydown", (e) => e.stopPropagation());
+			inp.addEventListener("input", () => {
+				const list = inp.value.split(",").map((x) => x.trim()).filter(Boolean);
+				if (!draft[fieldId]) draft[fieldId] = {};
+				draft[fieldId][valueId] = list;
+				inp.classList.toggle("has-words", list.length > 0);
+				markDirty();
+			});
+			host.appendChild(inp);
+			return inp;
+		};
+		const groups = document.createElement("div");
+		groups.className = "gp-kgroups";
+		for (const f of all) {
+			const sec = document.createElement("div");
+			sec.className = "gp-kgroup";
+			const entries = f.type === "choice"
+				? (f.choices || []).filter((x) => x.active !== false && x.label).map((c) => ({ id: c.id, label: c.label }))
+				: Object.keys(draft[f.id] || {}).map((guid) => {
+					let name = "(a record that no longer exists)";
+					try { const r = this.data.getRecord(guid); if (r) name = r.getName() || "(untitled)"; } catch (e) {}
+					return { id: guid, label: name, removable: true };
+				});
+			const withWords = entries.filter((e) => ((draft[f.id] || {})[e.id] || []).length).length;
+			const count = f.type === "choice" ? withWords + " of " + entries.length + " with aliases"
+				: (entries.length ? withWords + " of " + entries.length + " with aliases" : "no records yet");
+			this._add(sec, '<div class="gp-khead"><span class="gp-fcaps">' + this._esc(f.label.toUpperCase()) +
+				'</span><span class="gp-kcount">' + this._esc(count) + "</span></div>");
+			const grid = document.createElement("div");
+			grid.className = "gp-kgrid";
+			for (const e of entries) {
+				const cell = document.createElement("div");
+				cell.className = "gp-klabel";
+				cell.innerHTML = "<span>" + this._esc(e.label) + "</span>";
+				if (e.removable) {
+					const x = document.createElement("button");
+					x.className = "gp-kx";
+					x.textContent = "×";
+					x.addEventListener("click", () => { delete draft[f.id][e.id]; if (!Object.keys(draft[f.id]).length) delete draft[f.id]; markDirty(); this._render(); });
+					cell.appendChild(x);
+				}
+				grid.appendChild(cell);
+				input(f.id, e.id, grid);
+			}
+			sec.appendChild(grid);
+			if (f.type !== "choice") {
+				const anchor = document.createElement("div");
+				anchor.className = "gp-anchor gp-kadd";
+				const key = "kw:" + f.id;
+				const btn = document.createElement("button");
+				btn.className = "gp-kaddbtn" + (s.pop === key ? " is-open" : "");
+				btn.textContent = "+ Add a Record";
+				btn.addEventListener("click", (e) => { e.stopPropagation(); s.pop = s.pop === key ? null : key; s.popQ = ""; this._render(); });
+				anchor.appendChild(btn);
+				if (s.pop === key) {
+					const pop = this._fillSearchPop(f, "record", (guid) => {
+						if (!draft[f.id]) draft[f.id] = {};
+						if (!draft[f.id][guid]) draft[f.id][guid] = [];
+						s.pop = null; s.kwFocus = f.id + ":" + guid; markDirty();
+						this._render();
+					}, null, null, false);
+					anchor.appendChild(pop);
+					this._placePop(anchor, pop, "left");
+				}
+				sec.appendChild(anchor);
+			}
+			groups.appendChild(sec);
+		}
+		body.appendChild(groups);
+		if (s.kwFocus) {
+			const [fid, vid] = s.kwFocus.split(":");
+			s.kwFocus = null;
+			const inputs = Array.from(body.querySelectorAll(".gp-kinput"));
+			const want = ((draft[fid] || {})[vid] || []).join(", ");
+			const inp = inputs.reverse().find((i) => i.value === want && i.previousSibling && i.previousSibling.querySelector(".gp-kx"));
+			if (inp) setTimeout(() => inp.focus(), 0);
+		}
+		const acts = this._bar(screen, '<div class="gp-footnote">Saved with the plugin, so every device gets them.</div>');
+		this._quiet(acts, "Back", () => { s.kwDraft = null; s.kwDirty = false; s.pop = null; s.screen = "fill"; this._render(); });
+		saveBtn = this._primary(acts, "Save Aliases", () => {
+			const isRecordField = {};
+			for (const f of all) isRecordField[f.id] = f.type !== "choice";
+			for (const fid of Object.keys(draft)) {
+				if (!isRecordField[fid]) {
+					for (const vid of Object.keys(draft[fid])) if (!draft[fid][vid].length) delete draft[fid][vid];
+				}
+				if (!Object.keys(draft[fid]).length) delete draft[fid];
+			}
+			const kw = s.kw || this._loadKeywords();
+			if (Object.keys(draft).length) kw.map[col.guid] = draft; else delete kw.map[col.guid];
+			s.kw = this._stageKeywords(kw);
+			s.kwDraft = null; s.kwDirty = false; s.pop = null;
+			s.fill = null; s.fillSel = {}; s.fillLast = {}; s.fillOff = new Set(); s.fillPick = {};
+			s.screen = "fill"; this._render();
+		}, !!s.kwDirty);
+	}
+
+	/** What an autofilled field would be filled with, in words. The design
+	 *  hand-wrote these per field; here they come from the field's type and
+	 *  target, which is what they actually depend on. */
+	_fillAutoNote(f) {
+		if (f.type === "choice") return "an option matched by name or alias";
+		if (f.type === "datetime") return "a date written in the title";
+		const s = this._state;
+		const tc = f.filter_colguid ? (s.cols || []).find((c) => c.guid === f.filter_colguid) : null;
+		let item = null;
+		try { item = tc ? (tc.api.getConfiguration() || {}).item_name : null; } catch (e) {}
+		const what = (item && !/^(note|page|record)$/i.test(item)) ? "a " + item.toLowerCase()
+			: (tc ? "a record from " + tc.name : "a record");
+		return what + " named in the title, or what a matched record's own " + f.label + " points at";
+	}
+
+	/** Fill In Settings: autofill per field with what it fills itself with,
+	 *  what cannot autofill and why, and the shortcut as a click-to-record
+	 *  key field. */
+	_renderFillAuto(parent) {
+		const s = this._state, fill = s.fill, col = fill.col;
+		const screen = this._screen(parent);
+		const head = this._padTop(screen);
+		this._add(head, '<div class="gp-h2">Fill In Settings</div>');
+		const body = this._padScroll(screen);
+		body.classList.add("gp-fbody");
+		const autoDraft = s.autoDraft || (s.autoDraft = []);
+
+		const sec1 = this._fillSection(body, "AUTOFILL AT CREATION",
+			"A ticked field fills itself on every new " + this._esc(col.name) + " page created with a title " +
+			"already in place, while the field is blank and only where the match is sure enough to be ticked " +
+			"on its own. Pages created empty are left alone.", true);
+		const grid = this._fillGrid(sec1, ["FIELD", "FILLS ITSELF WITH"]);
+		const autoFields = fill.choiceFields.concat(fill.recordFields, fill.dateFields || []);
+		for (const f of autoFields) {
+			const on = autoDraft.indexOf(f.id) !== -1;
+			const toggle = () => {
+				if (on) s.autoDraft = autoDraft.filter((x) => x !== f.id); else autoDraft.push(f.id);
+				s.autoDirty = true; this._render();
+			};
+			this._fillTick(grid, on, toggle, false, false);
+			const fb = document.createElement("button");
+			fb.className = "gp-ffield" + (on ? "" : " is-dim");
+			fb.textContent = f.label;
+			fb.addEventListener("click", toggle);
+			grid.appendChild(fb);
+			this._add(grid, '<span class="gp-fnote' + (on ? "" : " is-dim") + '">' + this._esc(on ? this._fillAutoNote(f) : "left blank") + "</span>");
+		}
+		if ((fill.unscoped || []).length) {
+			const names = fill.unscoped.map((f) => f.label);
+			const list = names.length > 1 ? names.slice(0, -1).join(", ") + " and " + names[names.length - 1] : names[0];
+			this._fillSection(body, "CANNOT AUTOFILL", this._esc(list) + (names.length > 1 ? " link" : " links") +
+				" any record, so searching the whole workspace on every new page is too slow. Run Fill From Title on the page instead.", false);
+		}
+		const sec3 = this._fillSection(body, "SHORTCUT",
+			"Opens Fill From Title anywhere in Thymer. Click the keys, then press the new ones; Esc keeps these.", false);
+		const kwNow = s.kw || this._fillKw;
+		const sc = s.scDraft || (kwNow && kwNow.shortcut) || Plugin.FILL_SHORTCUT_DEFAULT;
+		const row = document.createElement("div");
+		row.className = "gp-kgrid gp-scrow";
+		this._add(row, '<span class="gp-sclabel">Open Fill From Title</span>');
+		const btn = document.createElement("button");
+		btn.className = "gp-scbtn" + (s.shortcutCapture ? " is-recording" : "");
+		btn.textContent = s.shortcutCapture ? "press keys…" : Plugin._fillComboLabel(sc);
+		btn.addEventListener("click", () => { s.shortcutCapture = !s.shortcutCapture; this._render(); });
+		row.appendChild(btn);
+		sec3.appendChild(row);
+
+		const acts = this._bar(screen, '<div class="gp-footnote">Saved with the plugin, so every device gets it.</div>');
+		this._quiet(acts, "Back", () => {
+			s.autoDraft = null; s.scDraft = null; s.shortcutCapture = false; s.autoDirty = false;
+			s.screen = "fill"; this._render();
+		});
+		this._primary(acts, "Save Settings", () => {
+			const kw = s.kw || this._loadKeywords();
+			if (!kw.auto) kw.auto = {};
+			if ((s.autoDraft || []).length) kw.auto[col.guid] = s.autoDraft.slice(); else delete kw.auto[col.guid];
+			if (s.scDraft) kw.shortcut = s.scDraft;
+			s.kw = this._stageKeywords(kw);
+			s.autoDraft = null; s.scDraft = null; s.shortcutCapture = false; s.autoDirty = false;
+			s.screen = "fill"; this._render();
+		}, !!(s.autoDirty || s.scDraft));
+	}
+
+	/** The write itself, shared by the Fill button and the autofill engine.
+	 *  Grouped per field so a multi-value field is written ONCE with everything
+	 *  it should hold: set([...]) replaces the whole array, which is why the
+	 *  existing ids are re-read HERE and carried in rather than assumed from
+	 *  the preview. blanksOnly is the autofill contract: a single-value field
+	 *  that gained a value since the compute is left alone. */
+	_writeFill(rec, byField, blanksOnly) {
+		let ok = 0, failed = 0;
+		for (const g of byField.values()) {
+			try {
+				const prop = rec.prop(g.field.id);
+				if (!prop) { failed++; continue; }
+				const cur = this._fillCurrent(rec, g.field);
+				if (blanksOnly && !g.field.many && cur.length) continue;
+				if (g.kind === "date") {
+					// A date is written as its parsed value, single-value only.
+					prop.set(g.values[g.values.length - 1]);
+					ok++;
+					continue;
+				}
+				// The base is what the field holds NOW, with the ticked edits
+				// applied to it (a swap replaces in place, a strike drops); the
+				// adds then land on top. set([...]) replaces the whole array,
+				// so the base has to be re-read here, never taken from the
+				// preview.
+				let base = cur.map((c) => c.id);
+				for (const e of (g.edits || [])) {
+					base = base.filter((id) => id !== e.editOf);
+					if (e.newId && base.indexOf(e.newId) === -1) base.push(e.newId);
+				}
+				const adds = g.adds.filter((id) => base.indexOf(id) === -1);
+				const ids = g.field.many ? base.concat(adds)
+					: (adds.length ? [adds[adds.length - 1]] : base.slice(0, 1));
+				if (g.kind === "choice") prop.setChoice(ids); else prop.set(ids);
+				ok++;
+			} catch (e) { failed++; }
+		}
+		return { ok, failed };
+	}
+
+	/* ── Autofill at creation ─────────────────────────────────────────────
+	 * Fill From Title, run by itself on a NEW page that arrived already
+	 * carrying a title (Quick Capture, duplicate, extract, a table row named
+	 * before Enter). Per collection, per field, opt-in from the Keyword
+	 * Aliases screen. Three promises, all load-bearing:
+	 *   - only pages with a title at the FIRST look (~400ms) qualify; a page
+	 *     created empty and then typed into is left to the command, because
+	 *     matching a half-typed title fills the wrong things
+	 *   - the title must then hold STILL for two consecutive looks before
+	 *     anything is computed, for the same reason
+	 *   - blanks only, and only lines the preview would TICK on its own;
+	 *     replaces never happen here, and the whole-workspace fields are out
+	 *     (1.3s per page creation is not a price to pay silently) */
+
+	_scheduleAutofill(newGuid) {
+		let kw = null;
+		try { kw = this._loadKeywords(); } catch (e) { return; }
+		if (!kw || !Object.keys(kw.auto || {}).length) return;
+		setTimeout(() => this._autofillCheck(newGuid, kw, 0, null, 0), 400);
+	}
+
+	_autofillCheck(guid, kw, attempt, lastTitle, stable) {
+		const rec = this.data.getRecord(guid);
+		if (!rec) {
+			if (attempt < 6) setTimeout(() => this._autofillCheck(guid, kw, attempt + 1, lastTitle, stable), 300);
+			return;
+		}
+		let title = ""; try { title = rec.getName() || ""; } catch (e) {}
+		if (attempt === 0 && !title) return;          // created empty: manual only
+		if (!title || title !== lastTitle) {
+			if (attempt < 14) setTimeout(() => this._autofillCheck(guid, kw, attempt + 1, title, 0), 800);
+			return;
+		}
+		if (stable < 1) {                             // two matching looks in a row
+			setTimeout(() => this._autofillCheck(guid, kw, attempt + 1, title, stable + 1), 800);
+			return;
+		}
+		const colGuid = this._recordCollectionGuid(rec);
+		const fieldIds = colGuid ? ((kw.auto || {})[colGuid] || []) : [];
+		if (!fieldIds.length) return;
+		this._autofillRun(rec, guid, title, colGuid, fieldIds);
+	}
+
+	async _autofillRun(rec, guid, title, colGuid, fieldIds) {
+		let cols = [];
+		try { cols = await this._collections(); } catch (e) { return; }
+		const ctx = { detached: true, cols, kw: this._loadKeywords(), recCache: {},
+			fillTarget: { rec, guid, title, colGuid },
+			fillOff: new Set(), fillPick: {}, fill: null };
+		try { await this._fillCompute(ctx); } catch (e) { return; }
+		const fill = ctx.fill;
+		if (!fill || fill.status !== "ready") return;
+		const lines = fill.lines.filter((l) => !l.ws && l.defOn && l.mode !== "replace" &&
+			fieldIds.indexOf(l.fieldId) !== -1);
+		if (!lines.length) return;
+		const byField = new Map();
+		for (const l of lines) {
+			if (!byField.has(l.fieldId)) byField.set(l.fieldId, { field: l.field, kind: l.kind, adds: [], values: [], edits: [] });
+			byField.get(l.fieldId).adds.push(l.id);
+			byField.get(l.fieldId).values.push(l.value);
+		}
+		const live = this.data.getRecord(guid) || rec;
+		const { ok } = this._writeFill(live, byField, true);
+		if (ok) this._toast("Filled " + ok + (ok === 1 ? " field" : " fields") + " from the title of " +
+			(title.length > 40 ? title.slice(0, 40) + "…" : title) + ".");
+	}
+
+	/** Write the ticked lines from the Fill button. */
+	async _doFill(picked) {
+		const s = this._state;
+		if (!s || s.busy || !picked.length) return;
+		s.busy = true;
+		const t = s.fillTarget;
+		const byField = new Map();
+		for (const l of picked) {
+			const field = this._fillFieldOf(l);
+			if (!field) continue;
+			if (!byField.has(field.id)) byField.set(field.id, { field, kind: l.kind, adds: [], values: [], edits: [] });
+			if (l.edit) { byField.get(field.id).edits.push({ editOf: l.editOf, newId: l.id }); continue; }
+			byField.get(field.id).adds.push(l.id);
+			byField.get(field.id).values.push(l.value);
+		}
+		// A FRESH handle, never the one the panel handed over when the dialog
+		// opened: a stale handle's writes reach the backend but not the open
+		// view, which read as "nothing happened until I restarted Thymer".
+		const rec = this.data.getRecord(t.guid) || t.rec;
+		const { ok, failed } = this._writeFill(rec, byField, false);
+		this._closeModal();
+		if (!failed) {
+			this._toast("Filled " + ok + (ok === 1 ? " field" : " fields") + " on " + (t.title || "the page") + ".");
+		} else {
+			this._toast("Filled " + ok + ". Failed on " + failed + (failed === 1 ? " field." : " fields."));
+		}
+	}
+
+	// ══════════════════════════════════════════════════════════════════════
 	// Screen: Rearrange — browse a collection's properties and reorder them
 	// ══════════════════════════════════════════════════════════════════════
 
@@ -4157,7 +5834,9 @@ class Plugin extends AppPlugin {
 
 /* ── screen scaffolding ──────────────────────────────────────────────────── */
 .gp-screen { display: flex; flex-direction: column; flex: 1; min-height: 0; }
-.gp-padtop { padding: 20px 24px 0; flex: none; }
+/* Solid, because the body scrolls UNDER it and section headers were showing
+   through the gap between blurb and list on the aliases screen. */
+.gp-padtop { padding: 20px 24px 0; flex: none; position: relative; z-index: 1; background: var(--gp-surface); }
 .gp-pad { padding: 16px 24px 8px; }
 /* The design file has no cap on the middle band because a page simply grows.
    Inside a modal capped at 760px it has to scroll, and it must be the ONLY
@@ -4861,6 +6540,128 @@ class Plugin extends AppPlugin {
 	white-space: nowrap; padding: 3px 6px; border-radius: 4px;
 }
 .gp-driftbtn:hover { filter: brightness(1.25); }
+
+/* ── Fill From Title, Keyword Aliases, Fill In Settings ────────────────── */
+/* One row grammar (design §6.0): 24px tick · 176px field · the rest, value
+   with its reason beneath. The tick cell is exactly the field cell's line box
+   (13.5px × 1.45 + 2×3px = 25.6px) so a box sits on the FIRST line of a row
+   that wraps. Checkboxes 13px, 2px radius, 40% veil border, selection band
+   fill. Sections are caps on their own line with copy beneath, 620px max. */
+.gp-fblurb { margin-bottom: 14px; }
+.gp-fband {
+	display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px;
+	padding: 11px 14px; border-radius: 4px; margin-bottom: 16px;
+	background: color-mix(in srgb, var(--gp-accent) 7%, transparent);
+	border: 1px solid color-mix(in srgb, var(--gp-accent) 30%, transparent);
+}
+.gp-fbandtext { font-size: 13px; color: var(--gp-text-body); white-space: nowrap; }
+.gp-fbandprop { font-weight: 600; font-size: 13.5px; color: var(--gp-accent-text); }
+.gp-fcaps { font-weight: 500; font-size: 10.5px; letter-spacing: .14em; color: var(--gp-text-dim); }
+.gp-frule { grid-column: 1 / -1; height: 1px; background: var(--gp-veil-7); margin: 7px 0 3px; }
+.gp-fgrid { display: grid; grid-template-columns: 24px 176px minmax(0, 1fr); align-items: start; gap: 0 12px; min-width: 0; }
+.gp-fgrid.is-row { padding: 3px 0; margin-bottom: 2px; }
+.gp-fsec { padding: 14px 0 6px; margin-top: 12px; border-top: 1px solid var(--gp-veil-7); }
+.gp-fsec.is-first { margin-top: 0; border-top: 0; padding-top: 0; }
+.gp-fsec > .gp-fcaps { display: block; }
+.gp-fcopy { font-size: 11.5px; line-height: 1.6; color: var(--gp-text-dim); text-wrap: pretty; max-width: 620px; margin: 5px 0 10px; }
+.gp-ftick { display: flex; justify-content: center; align-items: center; height: 25.6px; padding: 0; border-radius: 4px; }
+.gp-ftick:hover { opacity: .8; }
+.gp-ftick.is-idle { cursor: default; opacity: .45; }
+.gp-fbox {
+	display: flex; align-items: center; justify-content: center; flex: none;
+	width: 13px; height: 13px; border-radius: 2px; font-size: 9px; line-height: 1;
+	color: var(--gp-text); background: transparent; border: 1px solid var(--gp-veil-40);
+}
+.gp-fbox.is-on { background: var(--gp-accent-band); border-color: var(--gp-accent-band); }
+.gp-fbox.is-warn.is-on { background: var(--gp-warn); border-color: var(--gp-warn); color: #171208; }
+.gp-fbox .ti { display: block; line-height: 1; }
+.gp-ffield {
+	display: block; width: 100%; text-align: left; font-weight: 500; font-size: 13.5px; line-height: 1.45;
+	color: var(--gp-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding: 3px 0;
+}
+.gp-ffield.is-dim { color: var(--gp-text-2); }
+.gp-ffield.is-plain { cursor: default; }
+.gp-ffieldpick { display: flex; align-items: center; gap: 6px; }
+.gp-ffieldpick > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.gp-ffieldpick.is-dim { color: var(--gp-text-dim); }
+.gp-fchev { display: flex; align-items: center; justify-content: center; width: 12px; height: 12px; flex: none; color: var(--gp-accent-text); }
+.gp-fval { position: relative; display: flex; align-items: flex-start; gap: 8px; min-width: 0; padding: 3px 0; }
+.gp-fval.is-prop { padding: 6px 0; }
+.gp-fvalcol { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.gp-fvalue { font-weight: 500; font-size: 13.5px; line-height: 1.45; color: var(--gp-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gp-fvalue.is-wrap { white-space: normal; overflow-wrap: anywhere; text-wrap: pretty; }
+.gp-fvalue .gp-colicon { margin-right: 6px; vertical-align: -2px; }
+.gp-fvalue.is-dim { color: var(--gp-text-2); }
+.gp-fvalue.is-teal { color: var(--gp-accent-text); }
+.gp-fvalue.is-struck { color: var(--gp-text-dim); text-decoration: line-through; }
+.gp-fwhy { font-size: 11.5px; line-height: 1.45; color: var(--gp-text-dim); white-space: normal; overflow-wrap: anywhere; text-wrap: pretty; }
+.gp-fwhy.is-amber { color: var(--gp-warn); }
+.gp-fwhy.is-teal { color: var(--gp-accent-text); }
+.gp-fnote { font-size: 12.5px; line-height: 1.6; padding: 3px 0; text-wrap: pretty; color: var(--gp-text-body); }
+.gp-fnote.is-dim { color: var(--gp-text-dim); }
+.gp-fchevbtn { display: flex; align-items: center; justify-content: center; width: 16px; height: 16px; flex: none; margin-top: 3px; color: var(--gp-accent-text); }
+.gp-fchevbtn:hover { color: var(--gp-text); }
+.gp-fstrike { flex: none; margin-top: 2px; font-size: 13px; line-height: 1; color: var(--gp-text-dim); padding: 0 2px; }
+.gp-fstrike:hover { color: var(--gp-text); }
+.gp-ffilledtoggle { font-weight: 500; font-size: 12px; color: var(--gp-text-dim); padding: 5px 2px; border-radius: 4px; margin-top: 14px; }
+.gp-ffilledtoggle:hover { color: var(--gp-text); }
+/* pickers: search first, host font in the list, chosen row on the band */
+.gp-fpop { width: 320px; }
+.gp-fpop-field { width: 300px; }
+/* The note's text starts where the rows' text starts: list padding + row
+   padding = 24px. */
+.gp-fpopnote { padding: 10px 24px 9px; font-size: 12px; line-height: 1.55; color: var(--gp-text-body); text-wrap: pretty; }
+.gp-fpopnote.is-ruled { padding: 11px 24px 10px; border-bottom: 1px solid var(--gp-veil-7); }
+.gp-fpopsearch { padding: 10px 12px 0; }
+.gp-fpopmore .gp-fpopsearch { padding-top: 4px; border-top: 1px solid var(--gp-veil-7); margin-top: 2px; padding-top: 10px; }
+.gp-fpoplist { padding: 8px 12px 10px; display: flex; flex-direction: column; gap: 3px; max-height: 196px; overflow: auto; font-family: system-ui, -apple-system, sans-serif; }
+.gp-fpoprow {
+	display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%; text-align: left;
+	padding: 8px 12px; border-radius: 4px; font-size: 13px; line-height: 15px; color: var(--gp-text-2);
+}
+.gp-fpoprow:hover { background: var(--gp-veil-6); }
+.gp-fpoprow.is-on { color: #f2fbf9; background: var(--gp-accent-band); }
+.gp-fpoplabel { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.gp-fpoplabel > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gp-fpoplabel .gp-colicon { flex: none; }
+.gp-fpopmeta { font-size: 11px; line-height: 14px; white-space: nowrap; color: var(--gp-text-dim); min-width: 0; max-width: 55%; overflow: hidden; text-overflow: ellipsis; flex: none; }
+.gp-fpoprow.is-on .gp-fpopmeta { color: inherit; }
+.gp-fpopempty { padding: 10px 12px; font-size: 12.5px; color: var(--gp-text-dim); font-family: var(--gp-font); }
+/* footer: links left, count + actions right */
+.gp-ffootlinks { display: flex; align-items: center; gap: 16px; }
+.gp-flink { font-weight: 500; font-size: 12.5px; color: var(--gp-accent-text); padding: 4px 2px; border-radius: 4px; }
+.gp-flink:hover { color: var(--gp-text); }
+.gp-ffootnote { font-size: 12.5px; color: var(--gp-text-dim); margin-right: 4px; }
+/* aliases: 200px value column, no gutter */
+.gp-kgrid { display: grid; grid-template-columns: 200px minmax(0, 1fr); gap: 4px 12px; align-items: center; min-width: 0; }
+.gp-kgrid.is-head { gap: 0 12px; margin-bottom: 8px; }
+.gp-kgroups { display: flex; flex-direction: column; gap: 14px; }
+.gp-kgroup { display: flex; flex-direction: column; gap: 6px; }
+.gp-khead { display: flex; align-items: baseline; gap: 10px; }
+.gp-khead .gp-fcaps { white-space: nowrap; }
+.gp-kcount { font-size: 11.5px; color: var(--gp-text-dim); }
+.gp-klabel { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; font-weight: 500; font-size: 13.5px; line-height: 1.45; color: var(--gp-text); }
+.gp-klabel > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gp-kx { font-size: 13px; line-height: 1; color: var(--gp-text-dim); padding: 0 0 0 2px; }
+.gp-kx:hover { color: var(--gp-text); }
+.gp-panel .gp-kinput {
+	width: 100%; box-sizing: border-box; background: var(--gp-surface-chip); border: 1px solid var(--gp-veil-6);
+	border-radius: 4px; padding: 7px 10px; font-family: var(--gp-mono); font-size: 12.5px; color: var(--gp-text);
+}
+.gp-panel .gp-kinput.has-words { background: color-mix(in srgb, var(--gp-accent) 6%, transparent); border-color: color-mix(in srgb, var(--gp-accent) 28%, transparent); }
+.gp-panel .gp-kinput:focus { outline: none; border-color: color-mix(in srgb, var(--gp-accent) 45%, transparent); }
+.gp-kadd { width: 200px; }
+.gp-kaddbtn { width: 100%; border: 1px dashed var(--gp-faint); border-radius: 4px; padding: 9px; font-weight: 500; font-size: 12.5px; line-height: 16px; color: var(--gp-text-body); }
+.gp-kaddbtn:hover, .gp-kaddbtn.is-open { border-color: var(--gp-veil-28); color: var(--gp-text); }
+/* settings: the shortcut row */
+.gp-scrow { gap: 0 12px; }
+.gp-sclabel { font-weight: 500; font-size: 13.5px; color: var(--gp-text-2); }
+.gp-scbtn {
+	width: 176px; text-align: left; box-sizing: border-box; border-radius: 4px; padding: 7px 10px;
+	font-family: var(--gp-mono); font-size: 12.5px; color: var(--gp-text);
+	background: var(--gp-surface-chip); border: 1px solid var(--gp-veil-6);
+}
+.gp-scbtn.is-recording { color: var(--gp-text-dim); border-color: color-mix(in srgb, var(--gp-accent) 45%, transparent); }
 
 /* ── tooltip ─────────────────────────────────────────────────────────────── */
 /* Above the toast, because a tooltip is never the thing you want covered. */

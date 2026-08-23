@@ -1,5 +1,36 @@
 # Changelog
 
+## v1.3.0, 2026-08-23
+
+**New: Fill From Title.** A sixth screen, its own palette command, and ⌘⇧G from anywhere. Run it on a page and it proposes values for that page's fields from its own title. Tick what is right and press Fill; nothing already in a field changes unless you tick it.
+
+Four things become a proposal:
+
+- **A record whose name is in the title**, matched against the collection that field links to. Punctuation and spacing do not have to agree, so `Konst&Kulturakademin` finds *Konst & Kulturakademin*, and accented names match at word boundaries the way ASCII ones do.
+- **An option whose label is in the title**, whole or by one of its words when only one option could mean it.
+- **What a matched record itself points at**: the company a matched person works at, the habitat a matched company sits in. Records already linked on the page count as matches too, so a person you linked by hand still brings their company.
+- **A date written in the title**, through Thymer's own parser, Swedish translated first (`imorgon`, `nästa fredag`, `kl 14:00`). A date needs a day: a month or a year on its own is never one, so a page called "Chimney Yard Party 2026" keeps its own date.
+
+**One row per field.** The chevron beside a value opens the other candidates, along with a search over the whole target collection for anything the matcher never proposed. Multi-value fields add and select several at once; a single-value field that already holds something says what ticking it would displace, in amber.
+
+**Fits several fields** collects records that match a field which can link any record. There the record is certain and the field is the question, so the field is picked from the row.
+
+**On this page**, behind a toggle, lists what the fields already hold: the place to correct a value an earlier fill got wrong. Pick a different one, or strike it.
+
+Partial matches, a single word out of a longer name, are proposed unticked and say so, because "Elin" is three people.
+
+**Keyword Aliases.** Per collection, per field, per value: words or phrases that select a value the record's own name would not match (`möte, samtal → Contact Log`, `KKA → Konst & Kulturakademin`). Comma separated, matched whole and in any case. An alias is your own rule, so a hit by alias comes ticked.
+
+**Fill In Settings.** Autofill at creation lets chosen fields fill themselves on every new page created with a title already in place, while the field is blank and only where the match is sure enough to be ticked on its own. Pages created empty are left alone, and a title still being typed is never matched half written. Each ticked field says in words what it will put there. Fields that link any record are left out and say why. The shortcut is rebound here by pressing new keys.
+
+Everything Fill From Title saves lives on the plugin's own configuration, so it syncs across devices with the templates and rules.
+
+**Also in this release**
+
+- Value pickers search a collection's whole record list. They previously searched only the 400 most recent, so a record outside that window could not be found; only the drawn rows are capped now.
+- Popovers no longer flip above their trigger when they do not fit; they keep their place and scroll.
+- Clicking outside an open popover closes it in every screen, and clicking another row's chevron switches to that row's popover in one click.
+
 ## v1.2.1 — 2026-08-17
 
 - **Fixed: Default Values and Inherited Values were a dead end on a fresh install.** With no rules yet, the import screen replaced the real one whether or not there was anything to import, so a workspace that never had Auto-Init From Ancestor got a heading, one sentence and nothing else: no collection picker, no way to add one. Both screens were unreachable for every new user, which is what the first person to install 1.2.0 hit. The import is offered only when it has something to offer; otherwise the normal screen renders, with its own empty state. Reported by a user, and it was a real defect rather than a misunderstanding.

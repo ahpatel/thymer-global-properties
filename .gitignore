@@ -13,6 +13,9 @@ Assets/*
 !Assets/rearrange.png
 !Assets/inherited-values.png
 !Assets/default-values.png
+!Assets/fill-from-title.png
+!Assets/keyword-aliases.png
+!Assets/fill-in-settings.png
 
 # Verification harness: measures the live plugin against the design file.
 # Internal tooling, like deploy.mjs and HANDOVER.md.
