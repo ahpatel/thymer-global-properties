@@ -4394,6 +4394,14 @@ class Plugin extends AppPlugin {
 		const rank = (id) => { const i = order.indexOf(id); return i === -1 ? 9999 : i; };
 		lines.forEach((l, i) => { l._i = i; });
 		lines.sort((a, b) => rank(a.fieldId) - rank(b.fieldId) || a._i - b._i);
+		// A collection can carry property SETS, and the default set decides what
+		// a page actually SHOWS. Calendar's "Event" set lists only the nine
+		// Google fields, so a value written to Serves is stored, correct, and
+		// invisible on the page. That is indistinguishable from a lost write,
+		// and it cost a day of hunting; every line for such a field says so.
+		const pset = (cfg.property_sets || []).find((x) => x.id === cfg.property_set_default) || null;
+		const hiddenIds = pset ? new Set((cfg.fields || []).map((f) => f.id)
+			.filter((id) => (pset.member_ids || []).indexOf(id) === -1)) : null;
 		const unscoped = fields.filter((f) => f.type === "record" && !f.filter_colguid);
 		for (const f of unscoped) {
 			const hits = kwHits(f, new Set());
@@ -4418,7 +4426,7 @@ class Plugin extends AppPlugin {
 		}
 		const hasChoice = choiceFields.length > 0 || recordFields.length > 0 || unscoped.length > 0;
 		done({ status: "ready", col, lines, skipped, unscoped, hasChoice, choiceFields, recordFields,
-			dateFields,
+			dateFields, hiddenIds, hiddenSet: pset ? pset.name : null,
 			wsStatus: (unscoped.length && !s.detached) ? "loading" : "none",
 			loaded: Object.values(targets).filter(Boolean).map((x) => x.col.name) });
 		if (unscoped.length && !s.detached) setTimeout(() => this._fillComputeWorkspace(s), 0);
@@ -4503,9 +4511,14 @@ class Plugin extends AppPlugin {
 			const options = fill.unscoped.filter((f) =>
 				!this._fillCurrent(t.rec, f).some((c) => c.id === h.id));
 			if (!options.length) continue;
+			// NEVER pre-picked. The field is the question on these rows, so the
+			// row stays untouched until the user answers it. Pre-picking the
+			// only unscoped field also put TWO ticked lines on one single-value
+			// field (an alias hit and this row), and the write kept just one of
+			// them: that is what "the ticked values don't get added" was.
 			fill.lines.push({ key: "ws:" + h.id, ws: true, kind: "record", id: h.id, name: h.name,
 				colName: h.colName, colGuid: h.colGuid || null, word: h.word || null, options,
-				defPick: (fill.unscoped.length === 1 && !h.word) ? options[0].id : null });
+				defPick: null });
 		}
 		fill.wsStatus = "ready";
 		fill.wsCount = items.length;
@@ -4563,6 +4576,28 @@ class Plugin extends AppPlugin {
 	_fillEnsureSel() {
 		const s = this._state;
 		for (const g of this._fillGroups()) if (!s.fillSel[g.fieldId]) s.fillSel[g.fieldId] = this._fillDefaultSel(g);
+		this._fillEnforceSingle();
+	}
+
+	/** A single-value field takes ONE value, so only one line may be ticked for
+	 *  it. _fillExclusive keeps that true as the user clicks, but defaults are
+	 *  applied without a click, and two of them could land on the same field
+	 *  (an alias proposal and a fits-several-fields row). The write then kept
+	 *  the last one and dropped the other silently, which is the whole of the
+	 *  "I ticked it and it was not added" report. The first line in page order
+	 *  wins; the rest go quietly off. */
+	_fillEnforceSingle() {
+		const s = this._state;
+		if (!s.fill || !s.fill.lines) return;
+		const seen = new Set();
+		for (const l of s.fill.lines) {
+			const f = this._fillFieldOf(l);
+			if (!f || f.many || !this._fillIsOn(l)) continue;
+			if (!seen.has(f.id)) { seen.add(f.id); continue; }
+			if (l.ws) s.fillPick[l.key] = null;
+			else if (l.edit) s.fillOff.add(l.key);
+			else if (s.fillSel[l.fieldId]) s.fillSel[l.fieldId].delete(l.key);
+		}
 	}
 
 	/** What a group shows: its selection, or, unticked, what ticking it would
@@ -4682,6 +4717,14 @@ class Plugin extends AppPlugin {
 		} catch (e) { html = ""; }
 		line.iconHtml = html; line.iconFor = key;
 		return html;
+	}
+
+	/** "not shown in Event": the field exists and will be written, but the
+	 *  collection's property set leaves it off the page. */
+	_fillHiddenNote(field) {
+		const f = this._state.fill;
+		if (!field || !f || !f.hiddenIds || !f.hiddenIds.has(field.id)) return "";
+		return " · not shown in " + (f.hiddenSet || "this view");
 	}
 
 	/** The reason line under a value, in the design's words. Amber when the
@@ -4804,6 +4847,11 @@ class Plugin extends AppPlugin {
 				let why = whys.join(" · ");
 				if (replaces) why += " · replaces " + cur.map((c) => c.name).join(", ");
 				else if (on && g.field.many && cur.length) why += " · adds";
+				why += this._fillHiddenNote(g.field);
+				// How many candidates are behind the chevron. As a number ON the
+				// chevron, not a sentence in the reason line: "· 1 more to
+				// choose from" was longer than everything it sat beside.
+				const more = g.cands.length - shown.length;
 				this._fillTick(grid, on, () => this._fillRowToggle(g), replaces, false);
 				const fb = document.createElement("button");
 				fb.className = "gp-ffield" + (on ? "" : " is-dim");
@@ -4822,6 +4870,19 @@ class Plugin extends AppPlugin {
 					chev.innerHTML = Plugin.CHEVRON;
 					chev.addEventListener("click", (e) => { e.stopPropagation(); s.pop = s.pop === key ? null : key; s.popQ = ""; this._render(); });
 					cell.appendChild(chev);
+					// Its own line under the reason, not a clause inside it and
+					// not a number on the chevron: both were tried and both
+					// crowded the row. It opens the same picker.
+					if (more > 0) {
+						const b = document.createElement("button");
+						b.className = "gp-fmoreline";
+						b.textContent = more + (more === 1 ? " more to choose from" : " more to choose from");
+						b.addEventListener("click", (e) => {
+							e.stopPropagation();
+							s.pop = s.pop === key ? null : key; s.popQ = ""; this._render();
+						});
+						cell.querySelector(".gp-fvalcol").appendChild(b);
+					}
 					if (s.pop === key) { const pop = this._fillCandPop(g, cur); cell.appendChild(pop); this._placePop(cell, pop, "left"); }
 				}
 				grid.appendChild(cell);
@@ -4869,7 +4930,7 @@ class Plugin extends AppPlugin {
 				const why = this._fillWhy(line);
 				this._add(grid, '<div class="gp-fval"><span class="gp-fvalcol"><span class="gp-fvalue is-wrap">' +
 					this._fillIcon(line) + this._esc(line.name) + '</span><span class="gp-fwhy' + (why.amber ? " is-amber" : "") + '">' +
-					this._esc(why.text) + "</span></span></div>");
+					this._esc(why.text + this._fillHiddenNote(field)) + "</span></span></div>");
 			}
 		}
 
@@ -4888,7 +4949,8 @@ class Plugin extends AppPlugin {
 				const cell = document.createElement("div");
 				cell.className = "gp-fval gp-anchor";
 				const value = line.removed ? line.editName : (line.id ? line.name : line.editName);
-				const why = line.removed ? "removed" : (line.id ? "changes " + line.editName : "already on this page");
+				const why = (line.removed ? "removed" : (line.id ? "changes " + line.editName : "already on this page")) +
+					this._fillHiddenNote(line.field);
 				cell.innerHTML = '<span class="gp-fvalcol"><span class="gp-fvalue is-wrap' +
 					(on && !line.removed ? " is-teal" : "") + (line.removed ? " is-struck" : "") + '">' +
 					this._fillIcon(line, line.id || line.editOf) + this._esc(value) +
@@ -5268,25 +5330,29 @@ class Plugin extends AppPlugin {
 	 *  existing ids are re-read HERE and carried in rather than assumed from
 	 *  the preview. blanksOnly is the autofill contract: a single-value field
 	 *  that gained a value since the compute is left alone. */
-	_writeFill(rec, byField, blanksOnly) {
-		let ok = 0, failed = 0;
+	/** The write itself, shared by the Fill button and the autofill engine.
+	 *
+	 *  A PROPERTY WRITE DOES NOT LAND SYNCHRONOUSLY. Measured in the running
+	 *  app: `prop.set([guid])` returns, and reading the property back in the
+	 *  same tick still gives the OLD value; ~300ms later it gives the new one.
+	 *  So a read-back has to wait, and the first version of this check did not:
+	 *  it declared every write a failure and escalated all the way to addValue
+	 *  on top of a set that had in fact worked.
+	 *
+	 *  Grouped per field so a multi-value field is written ONCE with everything
+	 *  it should hold: set([...]) replaces the whole array, so the base is
+	 *  re-read here and never taken from the preview. blanksOnly is the
+	 *  autofill contract: a single-value field that gained a value since the
+	 *  compute is left alone. */
+	async _writeFill(rec, byField, blanksOnly, guid) {
+		const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+		const fresh = () => (guid && this.data.getRecord(guid)) || rec;
+		const jobs = [];
+
 		for (const g of byField.values()) {
 			try {
-				const prop = rec.prop(g.field.id);
-				if (!prop) { failed++; continue; }
 				const cur = this._fillCurrent(rec, g.field);
 				if (blanksOnly && !g.field.many && cur.length) continue;
-				if (g.kind === "date") {
-					// A date is written as its parsed value, single-value only.
-					prop.set(g.values[g.values.length - 1]);
-					ok++;
-					continue;
-				}
-				// The base is what the field holds NOW, with the ticked edits
-				// applied to it (a swap replaces in place, a strike drops); the
-				// adds then land on top. set([...]) replaces the whole array,
-				// so the base has to be re-read here, never taken from the
-				// preview.
 				let base = cur.map((c) => c.id);
 				for (const e of (g.edits || [])) {
 					base = base.filter((id) => id !== e.editOf);
@@ -5295,11 +5361,81 @@ class Plugin extends AppPlugin {
 				const adds = g.adds.filter((id) => base.indexOf(id) === -1);
 				const ids = g.field.many ? base.concat(adds)
 					: (adds.length ? [adds[adds.length - 1]] : base.slice(0, 1));
-				if (g.kind === "choice") prop.setChoice(ids); else prop.set(ids);
-				ok++;
-			} catch (e) { failed++; }
+				const job = { g, ids, before: base.slice(), ok: false, how: "set" };
+				jobs.push(job);
+				job.wrote = this._fillPut(fresh(), g, ids);
+			} catch (e) { jobs.push({ g, ids: [], before: [], ok: false, how: "threw", wrote: false }); }
 		}
-		return { ok, failed };
+		if (!jobs.length) return { ok: 0, failed: 0, missed: [] };
+
+		// Let the writes settle, then read them back.
+		await wait(500);
+		let pending = jobs.filter((j) => !(j.ok = j.wrote && this._fillLanded(fresh(), j.g, j.ids)));
+		if (pending.length) {
+			for (const j of pending) { j.wrote = this._fillPut(fresh(), j.g, j.ids) || j.wrote; j.how = "set again"; }
+			await wait(700);
+			pending = pending.filter((j) => !(j.ok = j.wrote && this._fillLanded(fresh(), j.g, j.ids)));
+		}
+		// Last resort for record fields: add the values one at a time. Only
+		// reached when the value is verifiably still absent, so it cannot
+		// duplicate one that landed.
+		if (pending.length) {
+			for (const j of pending) {
+				if (j.g.kind !== "record") continue;
+				try {
+					const prop = fresh().prop(j.g.field.id);
+					const have = this._fillCurrent(fresh(), j.g.field).map((c) => c.id);
+					for (const id of j.ids) {
+						if (have.indexOf(id) === -1 && prop && prop.addValue) prop.addValue(id);
+					}
+					j.how = "addValue";
+				} catch (e) {}
+			}
+			await wait(700);
+			for (const j of pending) j.ok = this._fillLanded(fresh(), j.g, j.ids);
+		}
+
+		let ok = 0, failed = 0;
+		const missed = [];
+		for (const j of jobs) {
+			this._fillTrace(j, fresh());
+			if (j.ok) ok++; else { failed++; missed.push(j.g.field.label); }
+		}
+		return { ok, failed, missed };
+	}
+
+	_fillPut(target, g, ids) {
+		try {
+			const prop = target.prop(g.field.id);
+			if (!prop) return false;
+			if (g.kind === "date") prop.set(g.values[g.values.length - 1]);
+			else if (g.kind === "choice") prop.setChoice(ids);
+			else prop.set(ids);
+			return true;
+		} catch (e) { return false; }
+	}
+
+	_fillLanded(target, g, ids) {
+		try {
+			const now = this._fillCurrent(target, g.field);
+			if (g.kind === "date") return now.length > 0;
+			const have = now.map((c) => c.id);
+			return ids.every((id) => have.indexOf(id) !== -1);
+		} catch (e) { return false; }
+	}
+
+	/** A ring buffer of the last 20 writes, for the next time a value goes
+	 *  missing: window.__gpFillLog. */
+	_fillTrace(j, target) {
+		try {
+			const log = window.__gpFillLog || (window.__gpFillLog = []);
+			let after = [];
+			try { after = this._fillCurrent(target, j.g.field).map((c) => c.id); } catch (e) {}
+			log.push({ at: new Date().toISOString(), field: j.g.field.label, id: j.g.field.id,
+				kind: j.g.kind, many: !!j.g.field.many, scoped: !!j.g.field.filter_colguid,
+				before: j.before, wrote: j.ids, after, how: j.how, verified: !!j.ok });
+			if (log.length > 20) log.shift();
+		} catch (e) {}
 	}
 
 	/* ── Autofill at creation ─────────────────────────────────────────────
@@ -5364,7 +5500,7 @@ class Plugin extends AppPlugin {
 			byField.get(l.fieldId).values.push(l.value);
 		}
 		const live = this.data.getRecord(guid) || rec;
-		const { ok } = this._writeFill(live, byField, true);
+		const { ok } = await this._writeFill(live, byField, true, guid);
 		if (ok) this._toast("Filled " + ok + (ok === 1 ? " field" : " fields") + " from the title of " +
 			(title.length > 40 ? title.slice(0, 40) + "…" : title) + ".");
 	}
@@ -5388,12 +5524,18 @@ class Plugin extends AppPlugin {
 		// opened: a stale handle's writes reach the backend but not the open
 		// view, which read as "nothing happened until I restarted Thymer".
 		const rec = this.data.getRecord(t.guid) || t.rec;
-		const { ok, failed } = this._writeFill(rec, byField, false);
+		// Close first: the user's part is done, and verifying takes about a
+		// second because the write has to settle before it can be read back.
+		const title = t.title;
 		this._closeModal();
+		const { ok, failed, missed } = await this._writeFill(rec, byField, false, t.guid);
 		if (!failed) {
-			this._toast("Filled " + ok + (ok === 1 ? " field" : " fields") + " on " + (t.title || "the page") + ".");
+			this._toast("Filled " + ok + (ok === 1 ? " field" : " fields") + " on " + (title || "the page") + ".");
 		} else {
-			this._toast("Filled " + ok + ". Failed on " + failed + (failed === 1 ? " field." : " fields."));
+			// Name them. "Failed on 1 field" sent the last report looking for a
+			// value that had never been written.
+			this._toast((ok ? "Filled " + ok + ", but " : "") + (missed || []).join(" and ") +
+				(missed && missed.length === 1 ? " did not save." : " did not save."));
 		}
 	}
 
@@ -6600,6 +6742,11 @@ class Plugin extends AppPlugin {
 .gp-fnote { font-size: 12.5px; line-height: 1.6; padding: 3px 0; text-wrap: pretty; color: var(--gp-text-body); }
 .gp-fnote.is-dim { color: var(--gp-text-dim); }
 .gp-fchevbtn { display: flex; align-items: center; justify-content: center; width: 16px; height: 16px; flex: none; margin-top: 3px; color: var(--gp-accent-text); }
+.gp-fmoreline {
+	align-self: flex-start; text-align: left; padding: 0; margin-top: 1px;
+	font-size: 11.5px; line-height: 1.45; color: var(--gp-accent-text);
+}
+.gp-fmoreline:hover { filter: brightness(1.25); }
 .gp-fchevbtn:hover { color: var(--gp-text); }
 .gp-fstrike { flex: none; margin-top: 2px; font-size: 13px; line-height: 1; color: var(--gp-text-dim); padding: 0 2px; }
 .gp-fstrike:hover { color: var(--gp-text); }

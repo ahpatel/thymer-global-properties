@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.3.1, 2026-08-24
+
+Fill From Title, after four days of "the ticked value was not saved" that turned out to be three different things.
+
+- **A field the page does not show now says so.** A collection can carry property sets, and the active set decides what a page displays. Calendar's "Event" set lists only its nine Google fields, so a value written to Serves was stored, correct and invisible. Every line for such a field reads "not shown in Event".
+- **Rows under "Fits several fields" are never pre-ticked.** The field is the question on those rows, so the row stays untouched until you answer it. Pre-picking also put two ticked lines on one single-value field, and the write kept only the last of them: that was the missing value.
+- **A single-value field can never hold two ticked lines**, however they were ticked. Exclusivity used to be enforced only when you clicked, which left defaults free to collide.
+- **A write is verified before it is called done.** A property write does not land synchronously, so the check waits for it, retries once if it is missing, and only then reports. The toast names any field that did not save instead of counting calls.
+- **The other candidates for a field are visible without opening the picker**, on their own line: "1 more to choose from", which opens it.
+
 ## v1.3.0, 2026-08-23
 
 **New: Fill From Title.** A sixth screen, its own palette command, and ⌘⇧G from anywhere. Run it on a page and it proposes values for that page's fields from its own title. Tick what is right and press Fill; nothing already in a field changes unless you tick it.
