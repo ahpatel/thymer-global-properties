@@ -488,29 +488,70 @@ class Plugin extends AppPlugin {
 	/** What a template application would do to a target, without doing it.
 	 *  This is also exactly what the preview screen renders, so what you are
 	 *  shown and what runs cannot drift apart. */
+	/* ARCHIVED FIELDS MUST NOT BLOCK AN ADD. `active: false` is how Thymer
+	 * deletes a property from the UI while keeping its data, and Parham renames
+	 * those "Deleted (X)". Such a field is not IN the collection as far as
+	 * anyone using it is concerned, so counting it as present told him
+	 * "Skipped, already in Recipes: Action Status" about a collection that
+	 * plainly did not have it. What it does still own is its ID, and record
+	 * values key on ids, so the new property gets a fresh one rather than
+	 * inheriting whatever the archived one stored.
+	 *
+	 * The id is derived from the original, not random: _plan runs on every
+	 * render and on the apply, and an id that changed between them would break
+	 * the per-collection exclusions, which are keyed on it. */
 	_plan(tpl, cfg) {
-		const haveNames = new Set(((cfg && cfg.fields) || []).map((f) => this._norm(f.label)));
-		const haveIds = new Set(((cfg && cfg.fields) || []).map((f) => f.id));
-		const add = [], skip = [];
+		const fields = (cfg && cfg.fields) || [];
+		const live = fields.filter((f) => f.active !== false);
+		const haveNames = new Set(live.map((f) => this._norm(f.label)));
+		const haveIds = new Set(fields.map((f) => f.id));
+		const byId = new Map(fields.map((f) => [f.id, f]));
+		const add = [], skip = [], reided = [];
 		for (const f of tpl.fields || []) {
 			if (haveNames.has(this._norm(f.label))) {
 				skip.push({ field: f, why: "a property with this name already exists" });
 				continue;
 			}
-			// Second guard, and the one that protects DATA: a field id is what
-			// record values are keyed on. Landing a template field on an id the
-			// target already uses would make the new property inherit whatever
-			// the old one stored. Different name, same id, so the name check
-			// above cannot catch it.
+			let out = f;
 			if (haveIds.has(f.id)) {
-				skip.push({ field: f, why: "its internal id is already used by another property" });
-				continue;
+				const other = byId.get(f.id);
+				// An id held by a LIVE property is a real collision: adding
+				// there would make the new property inherit its data.
+				if (!other || other.active !== false) {
+					skip.push({ field: f, why: "its internal id is already used by " +
+						((other && other.label) || "another property") });
+					continue;
+				}
+				const fresh = this._freeFieldId(f.id, haveIds);
+				if (!fresh) {
+					skip.push({ field: f, why: "its internal id is taken and no free one could be derived" });
+					continue;
+				}
+				out = Object.assign(JSON.parse(JSON.stringify(f)), { id: fresh });
+				reided.push({ label: f.label, was: other.label });
 			}
-			add.push(f);
-			haveNames.add(this._norm(f.label));
-			haveIds.add(f.id);
+			add.push(out);
+			haveNames.add(this._norm(out.label));
+			haveIds.add(out.id);
 		}
-		return { add, skip };
+		return { add, skip, reided };
+	}
+
+	/** An id shaped like the original and free in this collection: the last
+	 *  character walked through a fixed alphabet, then the last two. */
+	_freeFieldId(id, taken) {
+		const A = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+		const base = String(id || "");
+		if (base.length < 2) return null;
+		for (const c of A) {
+			const cand = base.slice(0, -1) + c;
+			if (cand !== base && !taken.has(cand)) return cand;
+		}
+		for (const c1 of A) for (const c2 of A) {
+			const cand = base.slice(0, -2) + c1 + c2;
+			if (cand !== base && !taken.has(cand)) return cand;
+		}
+		return null;
 	}
 
 	/** Apply a template to one collection. Reads the target's config FRESH,
@@ -2804,6 +2845,10 @@ class Plugin extends AppPlugin {
 			if (plan.skip.length) {
 				parts.push("Skipped, already in " + col.name + ": " +
 					plan.skip.map((k) => k.field.label).join(", ") + ".");
+			}
+			if ((plan.reided || []).length) {
+				parts.push(plan.reided.map((r) => r.label + " gets a new internal id, because “" +
+					r.was + "” is an archived property still holding the original").join(". ") + ".");
 			}
 			if (left.size) {
 				const names = this._orderList(col).filter((f) => left.has(f.id)).map((f) => f.label);

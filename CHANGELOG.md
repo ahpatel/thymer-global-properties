@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased, on top of v1.3.1
+
+- **An archived property no longer blocks an add.** `active: false` is how Thymer removes a property from the UI while keeping its data, so a collection that has only an archived leftover does not have the property. Adding Action Status to Recipes was refused with "Skipped, already in Recipes: Action Status" because an archived "Deleted (Action Status)" still held the original's internal id. Neither the name nor the id of an archived field blocks an add now; where the id is the clash, the new property gets its own derived id so it cannot inherit the archived one's stored values, and the preview says so. A live property still blocks, on both name and id, and the reason now names it.
+- The plugin description is one sentence again. The rest is in this file and in the README.
+
 ## v1.3.1, 2026-08-24
 
 Fill From Title, after four days of "the ticked value was not saved" that turned out to be three different things.
