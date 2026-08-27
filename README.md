@@ -102,7 +102,7 @@ Four things become a proposal:
 
 - **A record whose name is in the title**, matched against the collection that field links to. Punctuation and spacing do not have to agree, so `Konst&Kulturakademin` finds *Konst & Kulturakademin*.
 - **An option whose label is in the title**, or one of your aliases for it.
-- **What a matched record itself points at**: the company a matched person works at, the people a matched company employs, the habitat a matched company sits in. Records already linked on the page count as matches too, so a person you linked by hand still brings their company.
+- **What a matched record itself points at**: the company a matched person works at, the people a matched company employs, the habitat a matched company sits in. The association counts whichever way it is stored — a field on the org, or an Employer field on the person. Records already linked on the page count as matches too, so a person you linked by hand still brings their company.
 - **An abbreviation of a record's name**, derived from the name itself, nothing to maintain. `EPA` finds *Environmental Protection Agency*, `JLL` finds *Jones Lang LaSalle*, `DOE` finds *Department of Energy* — both ways English shortens, with or without the little words. An abbreviation only one record could mean comes ticked; one several records share comes unticked, like a partial match.
 - **A date written in the title**, read the way Thymer reads it. `imorgon`, `nästa fredag`, `2026-05-12`, `May 12 at 14:00`. A month or a year alone is never a date, so a page called "Chimney Yard Party 2026" keeps its own.
 
@@ -114,7 +114,7 @@ One row per field. The chevron beside a value opens the other candidates, along 
 
 **On this page** lists what the fields already hold, behind a toggle: the place to fix a value that an earlier fill got wrong. Pick a different one, or strike it.
 
-Partial matches, single words out of a longer name, are proposed unticked and say so, because "Elin" is three people.
+Partial matches, single words out of a longer name, are proposed unticked and say so, because "Elin" is three people. A partial that survives inside what the title already matched is a different thing: "USDA meeting with Keith" names an org *and* a word, so the Keith who belongs to USDA comes ticked, however many Keiths the workspace holds.
 
 #### Keyword Aliases
 

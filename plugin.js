@@ -3959,6 +3959,16 @@ class Plugin extends AppPlugin {
 
 	static _fillIsUpper(w) { return !!w && w[0] !== w[0].toLowerCase() && w[0] === w[0].toUpperCase(); }
 
+	/** Does a record's name contain this title word whole? Case-insensitive,
+	 *  on Unicode word boundaries — the same edges the partial tier matches
+	 *  on, so "Keith" is found in "Keith Jones" and not in "Keisha". */
+	static _fillWordInName(name, raw) {
+		if (!name || !raw) return false;
+		try {
+			return new RegExp("(?<![\\p{L}\\p{N}])" + Plugin._fillEsc(raw) + "(?![\\p{L}\\p{N}])", "iu").test(name);
+		} catch (e) { return false; }
+	}
+
 	/** ONE regex per pool: canonical names as alternatives, longest first, so at
 	 *  any position the engine takes the longest name that fits ("John Doe"
 	 *  before "John") and the global scan moves past it so nothing overlaps.
@@ -4449,6 +4459,12 @@ class Plugin extends AppPlugin {
 				}
 				for (const src of sources) {
 					const hit = src.h;
+					const addCand = (lr) => {
+						if (!lr || !lr.guid || lr.guid === t.guid) return;   // never the page itself
+						if (cands.has(lr.guid)) { if (!src.weak && !filled) cands.get(lr.guid).weak = false; return; }
+						let name = ""; try { name = lr.getName() || ""; } catch (e) {}
+						if (name) cands.set(lr.guid, { id: lr.guid, name, via: hit.name, weak: src.weak || filled });
+					};
 					for (const path of paths) {
 						let linked = [];
 						try {
@@ -4456,13 +4472,25 @@ class Plugin extends AppPlugin {
 							linked = p ? (p.linkedRecords ? p.linkedRecords()
 								: (p.linkedRecord() ? [p.linkedRecord()] : [])) : [];
 						} catch (e) { linked = []; }
-						for (const lr of (linked || [])) {
-							if (!lr || !lr.guid) continue;
-							if (cands.has(lr.guid)) { if (!src.weak && !filled) cands.get(lr.guid).weak = false; continue; }
-							let name = ""; try { name = lr.getName() || ""; } catch (e) {}
-							if (name) cands.set(lr.guid, { id: lr.guid, name, via: hit.name, weak: src.weak || filled });
-						}
+						for (const lr of (linked || [])) addCand(lr);
 					}
+					// ...and the association the OTHER way, stored on the other
+					// side: "Employer" on the person, which the org's own config
+					// never mentions. getBackReferences is the app's own index
+					// of exactly that. Property links only — a line mention is
+					// a note that once named USDA, not a fact about who belongs
+					// to it — and only records of the collection this field
+					// links to, because nothing else can be written into it.
+					try {
+						const refs = hit.rec.getBackReferences ? (await hit.rec.getBackReferences()) || [] : [];
+						for (const ref of refs) {
+							if (!ref || ref.kind !== "property") continue;
+							const lr = ref.record;
+							if (!lr || !lr.guid) continue;
+							if (this._recordCollectionGuid(lr) !== f.filter_colguid) continue;
+							addCand(lr);
+						}
+					} catch (e) {}
 				}
 			}
 			follow[f.id] = Array.from(cands.values());
@@ -4509,6 +4537,21 @@ class Plugin extends AppPlugin {
 
 		// Now against what the page already holds. Agrees -> hidden. Multi ->
 		// add. Single and empty -> fill. Single and different -> replace.
+		// The capitalised words of the title, the word tier's rules minus the
+		// cap. The cap exists so "Keith" does not propose twenty Keiths; but
+		// a word that survives into a follow candidate is no longer twenty
+		// people, it is the few who belong to the record the title matched.
+		const capWords = [];
+		{
+			const wordsRe = /[\p{L}\p{N}]+/gu;
+			let mm;
+			while ((mm = wordsRe.exec(title))) {
+				if (mm[0].length < Plugin.FILL_MIN_CHARS || !Plugin._fillIsUpper(mm[0])) continue;
+				const low = mm[0].toLowerCase();
+				if (Plugin.FILL_DATE_WORDS.has(Plugin.FILL_SV[low] || low)) continue;
+				capWords.push(mm[0]);
+			}
+		}
 		const lines = [];
 		const push = (f, kind, hits, viaAmbiguous) => this._fillPush(lines, t.rec, f, kind, hits, viaAmbiguous);
 		for (const f of recordFields) {
@@ -4521,12 +4564,22 @@ class Plugin extends AppPlugin {
 			// A follow candidate that is ALSO a partial match is the one line on
 			// the page with two independent signals ("Elin", and the Elin who
 			// works at the matched company): one line, ticked. The other Elins
-			// stay as unticked partials.
+			// stay as unticked partials. The same holds when the word was too
+			// common to survive the partial cap at all: "Keith" alone is twenty
+			// people, Keith at the matched USDA is one, and the title said both.
+			// Only from a strong source — a weak one adds nothing.
 			const fl = follow[f.id] || [];
 			const partById = new Map(parts.map((h) => [h.id, h]));
-			const merged = fl.map((h) => partById.has(h.id)
-				? Object.assign({}, h, { word: partById.get(h.id).word,
-					init: partById.get(h.id).init || null, strong: !h.weak }) : h);
+			const merged = fl.map((h) => {
+				const p = partById.get(h.id);
+				if (p) return Object.assign({}, h, { word: p.word,
+					init: p.init || null, strong: !h.weak });
+				if (!h.weak) {
+					const w = capWords.find((cw) => Plugin._fillWordInName(h.name, cw));
+					if (w) return Object.assign({}, h, { word: w, strong: true });
+				}
+				return h;
+			});
 			const followIds = new Set(fl.map((h) => h.id));
 			if (merged.length) push(f, "record", merged, fl.filter((h) => !h.weak).length > 1);
 			push(f, "record", parts.filter((h) => !followIds.has(h.id)), false);

@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.6.0, 2026-08-27
+
+**Common names, resolved through what the title already matched.** "USDA meeting with Keith": the org comes in by abbreviation, and now the Keith who belongs to USDA comes ticked — however many Keiths the workspace holds.
+
+- A title word that was too common to propose on its own ("Keith" is twenty people) no longer dies at the cap. When it survives inside the people of the record the title matched, it is the same two-signal line that was already ticked: the word, and the org.
+- Associations now count whichever way they are stored. The engine read what the matched record points at through its own fields; it now also reads Thymer's back-references, so an Employer field living on the person — with nothing on the org at all — connects just the same. Property links only: a note that once named USDA is not a fact about who belongs to it.
+- A record can never be proposed into a field on itself, which back-references made newly possible on collections that link their own records.
+
 ## v1.5.0, 2026-08-27
 
 **Abbreviations, derived, not typed.** A title word like `EPA` now finds *Environmental Protection Agency*, `JLL` finds *Jones Lang LaSalle*, `DOE` finds *Department of Energy* — the initialism is computed from each record's own name, so there is nothing to maintain and no alias list to type.
