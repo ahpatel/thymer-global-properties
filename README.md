@@ -103,6 +103,7 @@ Four things become a proposal:
 - **A record whose name is in the title**, matched against the collection that field links to. Punctuation and spacing do not have to agree, so `Konst&Kulturakademin` finds *Konst & Kulturakademin*.
 - **An option whose label is in the title**, or one of your aliases for it.
 - **What a matched record itself points at**: the company a matched person works at, the people a matched company employs, the habitat a matched company sits in. Records already linked on the page count as matches too, so a person you linked by hand still brings their company.
+- **An abbreviation of a record's name**, derived from the name itself, nothing to maintain. `EPA` finds *Environmental Protection Agency*, `JLL` finds *Jones Lang LaSalle*, `DOE` finds *Department of Energy* — both ways English shortens, with or without the little words. An abbreviation only one record could mean comes ticked; one several records share comes unticked, like a partial match.
 - **A date written in the title**, read the way Thymer reads it. `imorgon`, `nästa fredag`, `2026-05-12`, `May 12 at 14:00`. A month or a year alone is never a date, so a page called "Chimney Yard Party 2026" keeps its own.
 
 One row per field. The chevron beside a value opens the other candidates, along with a search for anything the matcher never proposed, so a proposal that is close but wrong takes one click to correct. Multi-value fields add and never replace, and a single-value field that already holds something says what ticking it would displace.
@@ -119,7 +120,7 @@ Partial matches, single words out of a longer name, are proposed unticked and sa
 
 ![Keyword aliases](Assets/keyword-aliases.png)
 
-A word in a title that should select a value the record's own name would not match. `möte, samtal, avstämning` selects *Contact Log*; `KKA` selects *Konst & Kulturakademin*. Per collection, per field, per value, comma separated, matched whole and in any case. An alias is your rule, so a hit by alias comes ticked.
+A word in a title that should select a value the record's own name would not match. `möte, samtal, avstämning` selects *Contact Log*; `KKA` selects *Konst & Kulturakademin*. Per collection, per field, per value, comma separated, matched whole and in any case. An alias is your rule, so a hit by alias comes ticked. Abbreviations you do not need to write: initialisms are derived from every name, so `EPA` finds *Environmental Protection Agency* by itself.
 
 #### Fill In Settings
 

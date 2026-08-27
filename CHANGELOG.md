@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.5.0, 2026-08-27
+
+**Abbreviations, derived, not typed.** A title word like `EPA` now finds *Environmental Protection Agency*, `JLL` finds *Jones Lang LaSalle*, `DOE` finds *Department of Energy* — the initialism is computed from each record's own name, so there is nothing to maintain and no alias list to type.
+
+- Both ways English shortens: `USA` drops the little words out of *United States of America*, and `DOE` keeps the "of" in *Department of Energy*, so both are indexed and a title word only has to agree with one.
+- Words that are themselves acronyms take no part in the derivation, so *NASA Ames Research Center* shortens to `ARC` — which is in fact its abbreviation — and *AT&T Corporation* shortens to nothing worth keeping.
+- A hit is as sure as a whole name, or it is a partial: an initialism only one record in the pool could mean comes ticked; one several records share comes unticked and says so, like any partial.
+- A short list of business jargon — `CEO`, `KPI`, `OKR`, `EOD` and friends — never derives a match: the title means the meeting, not the person whose initials spell it.
+- Nothing changes about aliases; they remain for the abbreviations no initials can derive.
+
 ## v1.4.0, 2026-08-27
 
 Two keyboard answers to "why is the hand back on the mouse".

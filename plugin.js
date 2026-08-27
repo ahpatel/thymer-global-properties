@@ -3935,6 +3935,18 @@ class Plugin extends AppPlugin {
 	static FILL_MIN_CHARS = 3;
 	static FILL_PARTIAL_MAX = 3;
 
+	/* Initialisms that business titles use for the JOB, not the record.
+	 * "CEO sync" means the meeting, not the person whose initials spell
+	 * CEO; the initialism of "Carl Erik Olsson" must never tick him into
+	 * Attendees on a page full of role words. A short, deliberate list of
+	 * the jargon that recurs in titles, not an attempt to list every
+	 * English acronym. */
+	static FILL_INIT_SKIP = new Set(["ceo", "cfo", "coo", "cto", "cio", "cmo", "cro", "chro",
+		"cpa", "crm", "erp", "sap", "kpi", "roi", "sla", "sow", "nda", "msa", "poc",
+		"mvp", "seo", "okr", "qbr", "ebr", "fyi", "pr", "hr", "ai", "ml", "ui", "ux",
+		"qa", "po", "pm", "tbd", "eod", "eow", "asap", "eta", "wip", "dev",
+		"pto", "ooo", "wfh", "rto"]);
+
 	static _fillEsc(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
 
 	/** Canonical form: lowercase, every run of non-letters/digits is ONE space.
@@ -3950,10 +3962,16 @@ class Plugin extends AppPlugin {
 	/** ONE regex per pool: canonical names as alternatives, longest first, so at
 	 *  any position the engine takes the longest name that fits ("John Doe"
 	 *  before "John") and the global scan moves past it so nothing overlaps.
-	 *  Also indexes the CAPITALISED words of every name for partial matching.
+	 *  Also indexes the CAPITALISED words of every name for partial matching,
+	 *  and every name's INITIALISMS for abbreviation matching ("EPA" finds
+	 *  Environmental Protection Agency; "DOE" finds Department of Energy).
+	 *  Two variants, because English abbreviates both ways: title-case words
+	 *  only (USA drops the lowercase "of"), and every word counting (DOE
+	 *  keeps it). All-caps words like "NASA" or "AT&T" are acronyms already
+	 *  and take no part.
 	 *  names: [{ name, id, rec? }] */
 	static _fillCompilePool(names, loose) {
-		const byKey = new Map(), byWord = new Map();
+		const byKey = new Map(), byWord = new Map(), byInit = new Map();
 		for (const n of names || []) {
 			const name = String(n.name || "").trim();
 			if (name.length < Plugin.FILL_MIN_CHARS) continue;
@@ -3969,6 +3987,33 @@ class Plugin extends AppPlugin {
 				seen.add(w);
 				if (!byWord.has(w)) byWord.set(w, []);
 				byWord.get(w).push(n);
+			}
+			// Initialism, in TWO variants because English abbreviates both
+			// ways: title-case words only ("United States of America" drops
+			// the lowercase "of" -> USA), or every word counting ("Department
+			// of Energy" keeps it -> DOE). Both are indexed; a title word
+			// only has to agree with one of them. Words that are themselves
+			// all-caps ("NASA") or start with a digit ("3M") are acronyms
+			// already and take no part, so "NASA Ames Research Center"
+			// shortens to ARC, which is in fact its abbreviation.
+			if (!loose) {
+				const words = name.split(/[^\p{L}\p{N}]+/u)
+					.filter((w) => /^\p{L}/u.test(w) && !/^\p{Lu}+$/u.test(w));
+				const inits = new Set();
+				const tc = words.filter((w) => /^\p{Lu}[\p{Ll}]*$/u.test(w));
+				if (tc.length >= 2) inits.add(tc.map((w) => w[0]).join("").toLowerCase());
+				if (words.length >= 2) inits.add(words.map((w) => w[0]).join("").toLowerCase());
+				for (const init of inits) {
+					// Three letters minimum: two is a sound, not a name. Not
+					// when the initialism is already a word of the name, and
+					// not the business jargon that titles use for the job
+					// rather than the record.
+					if (init.length < Plugin.FILL_MIN_CHARS || seen.has(init) ||
+						Plugin.FILL_INIT_SKIP.has(init)) continue;
+					n._init = init;
+					if (!byInit.has(init)) byInit.set(init, []);
+					byInit.get(init).push(n);
+				}
 			}
 		}
 		// Bigrams of every name's canonical words, for PHRASE matching: a run
@@ -3991,7 +4036,7 @@ class Plugin extends AppPlugin {
 			re = new RegExp("(?<![\\p{L}\\p{N}])(?:" + keys.map(Plugin._fillEsc).join("|") +
 				")(?![\\p{L}\\p{N}])", "yu");
 		} catch (e) { return null; }
-		return { re, byKey, byWord, byBigram };
+		return { re, byKey, byWord, byBigram, byInit };
 	}
 
 	/** Every pool item whose whole name occurs in the title, in title order.
@@ -4108,6 +4153,43 @@ class Plugin extends AppPlugin {
 				if (seen.has(it.id) || !free(w.start, w.end, it)) continue;
 				seen.add(it.id);
 				out.push({ item: it, name: it.name, word: w.raw });
+			}
+		}
+		return out;
+	}
+
+	/** The initialism tier, between whole-name and word-partial: an ALL-CAPS
+	 *  title word equal to the initialism of a multi-word name ("EPA" ->
+	 *  Environmental Protection Agency). All-caps because abbreviations are
+	 *  typed uppercase; a merely capitalised word is a normal partial.
+	 *
+	 *  A hit is STRONG — the caller may tick it — when the initialism maps
+	 *  to exactly one record in the pool: one word, one name, as sure as
+	 *  the whole name would be. Several names sharing an initialism come
+	 *  back weak, with the word on them, exactly like word partials. */
+	static _fillInit(title, pool, taken) {
+		if (!title || !pool || !pool.byInit) return [];
+		const out = [], seen = new Set();
+		const words = [];
+		const wordsRe = /[\p{L}\p{N}]+/gu;
+		let m, cpos = 0;
+		while ((m = wordsRe.exec(title))) {
+			words.push({ raw: m[0], start: cpos, end: cpos + m[0].length });
+			cpos += m[0].length + 1;
+		}
+		const free = (a, b, it) => !(taken || []).some((t) => a < t.end && t.start < b &&
+			(t.item.colName || "") === (it.colName || ""));
+		for (const w of words) {
+			if (w.raw.length < Plugin.FILL_MIN_CHARS || !/^\p{Lu}{3,}$/u.test(w.raw)) continue;
+			const low = w.raw.toLowerCase();
+			if (Plugin.FILL_INIT_SKIP.has(low)) continue;
+			const items = pool.byInit.get(low);
+			if (!items || !items.length || items.length > Plugin.FILL_PARTIAL_MAX) continue;
+			const strong = items.length === 1;
+			for (const it of items) {
+				if (seen.has(it.id) || !free(w.start, w.end, it)) continue;
+				seen.add(it.id);
+				out.push({ item: it, name: it.name, init: w.raw, word: strong ? null : w.raw, strong });
 			}
 		}
 		return out;
@@ -4304,6 +4386,15 @@ class Plugin extends AppPlugin {
 				seen.add(h.item.id);
 				hits.push({ id: h.item.id, name: h.name, rec: h.item.rec, via: null });
 			}
+			// The initialism tier sits between whole names and word partials:
+			// "EPA" is derived, so it never outranks the literal name, but it
+			// is a deliberate abbreviation, so a unique one is ticked.
+			for (const h of (tg ? Plugin._fillInit(title, tg.pool, full) : [])) {
+				if (seen.has(h.item.id)) continue;
+				seen.add(h.item.id);
+				if (h.strong) hits.push({ id: h.item.id, name: h.name, rec: h.item.rec, via: null, init: h.init, strong: true });
+				else parts.push({ id: h.item.id, name: h.name, rec: h.item.rec, word: h.word, init: h.init });
+			}
 			for (const h of (tg ? Plugin._fillPartial(title, tg.pool, full) : [])) {
 				if (seen.has(h.item.id)) continue;
 				seen.add(h.item.id);
@@ -4434,7 +4525,8 @@ class Plugin extends AppPlugin {
 			const fl = follow[f.id] || [];
 			const partById = new Map(parts.map((h) => [h.id, h]));
 			const merged = fl.map((h) => partById.has(h.id)
-				? Object.assign({}, h, { word: partById.get(h.id).word, strong: !h.weak }) : h);
+				? Object.assign({}, h, { word: partById.get(h.id).word,
+					init: partById.get(h.id).init || null, strong: !h.weak }) : h);
 			const followIds = new Set(fl.map((h) => h.id));
 			if (merged.length) push(f, "record", merged, fl.filter((h) => !h.weak).length > 1);
 			push(f, "record", parts.filter((h) => !followIds.has(h.id)), false);
@@ -4522,7 +4614,8 @@ class Plugin extends AppPlugin {
 			if (curIds.has(h.id)) continue;
 			const mode = f.many ? "add" : (cur.length ? "replace" : "fill");
 			lines.push({ key: f.id + ":" + h.id, fieldId: f.id, field: f, kind, id: h.id, rec: h.rec || null,
-				name: h.name, via: h.via || null, word: h.word || null, colName: h.colName || null,
+				name: h.name, via: h.via || null, word: h.word || null, init: h.init || null,
+				colName: h.colName || null,
 				value: h.value, mode, current: cur, strong: !!h.strong, alias: !!h.alias, dateHit: !!h.dateHit,
 				defOn: mode !== "replace" && !h.weak &&
 					(h.strong || h.dateHit || (!(h.via && viaAmbiguous) && !h.word)) });
@@ -4795,6 +4888,7 @@ class Plugin extends AppPlugin {
 		const partial = !!line.word && !line.strong && !line.dateHit && !line.alias;
 		const bits = [];
 		if (line.word && line.alias) bits.push("alias “" + line.word + "”");
+		else if (line.init) bits.push("abbreviation “" + (typeof line.init === "string" ? line.init : line.word) + "”");
 		else if (partial) bits.push("partial match on “" + line.word + "”");
 		else if (line.via) bits.push("via " + line.via);
 		else bits.push("in the title");
