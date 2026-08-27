@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.8.0, 2026-08-27
+
+- **Removed: Enter in the title field.** It never fired, and it never could: Thymer's editor routes every keystroke through one hidden proxy textarea, so a keydown never carries the title field's identity — where the caret sits is state no plugin can see. Enter in the Fill dialog stays; that one is our own DOM and works. The keyboard path to a fill is therefore ⌘⇧G, glance, Enter.
+- **Fixed: associations through the page's own values were gated on the wrong schema.** The follow engine skipped a field entirely unless the matched record's collection had a field pointing back — so with the org stored only on the person ("Employer" → Acme Co) and nothing on the company, a pre-filled Acme Co was never consulted and "John/Jim 1:1" proposed nobody. The guard is gone: the page's own values now anchor recommendations whichever way the association is stored, and the top recommendations for two common names are the John and Jim whose org is already on the page.
+
 ## v1.7.0, 2026-08-27
 
 **Corrections, one motion.** Guesses are only as good as their correction, so the picker and the dialog now both put what will be written in reach.

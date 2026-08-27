@@ -84,8 +84,6 @@ class Plugin extends AppPlugin {
 	_style = null;
 	_fillKw = null;
 	_onFillKey = null;
-	_onTitleKey = null;
-	_titleLast = { guid: null, at: 0, title: "", raw: "" };
 	_ovl = null;
 	_state = null;
 	_pending = null;
@@ -122,46 +120,6 @@ class Plugin extends AppPlugin {
 			this._open("fill");
 		};
 		window.addEventListener("keydown", this._onFillKey, true);
-		// Enter in the page TITLE field runs Fill From Title, silently, on the
-		// record in front of you. Same capture-phase window listener, same
-		// discipline: never react to a chord, never while the dialog is open.
-		//
-		// The title field is identified the only way it can be from outside:
-		// an input at the very top of the panel, above the body editor, whose
-		// TEXT IS THE PAGE TITLE. That last test is the load-bearing one — a
-		// property input in the same place holds a property value, and its
-		// value never matches the title, so the fill quietly never runs.
-		// The value is captured at the keydown and re-checked after the title
-		// has had a moment to commit, so "still being typed" cannot match
-		// half a title either.
-		this._onTitleKey = (e) => {
-			if (this._ovl) return;
-			if (e.key !== "Enter" || e.repeat || e.isComposing) return;
-			if (e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;
-			const tgt = e.target;
-			if (!tgt || tgt.nodeType !== 1) return;
-			const tag = (tgt.tagName || "").toLowerCase();
-			if (tag !== "input" && tag !== "textarea") return;
-			if (tgt.closest && tgt.closest(".gp-ovl")) return;
-			let panel = null;
-			try { panel = this.ui.getActivePanel(); } catch (err) {}
-			if (!panel || !panel.getType || panel.getType() !== "edit_panel") return;
-			const rec = panel.getActiveRecord && panel.getActiveRecord();
-			if (!rec || !rec.guid) return;
-			const pel = panel.getElement && panel.getElement();
-			if (!pel || !pel.contains(tgt)) return;
-			const pr = pel.getBoundingClientRect();
-			const tr = tgt.getBoundingClientRect();
-			if (tr.width < 1 || tr.top - pr.top > 160) return;
-			// The body editor's own proxy is a textarea too: excluded by
-			// identity, whatever it looks like on screen.
-			try { if (window.g_virtual_input && tgt === window.g_virtual_input.$textarea) return; } catch (err) {}
-			// Never swallow the key: Thymer's own Enter still runs (commits the
-			// title, moves the caret). The fill rides along, delayed, and only
-			// writes what the preview would have ticked into a blank field.
-			this._titleEnterSchedule(rec.guid, (tgt.value != null ? String(tgt.value) : ""));
-		};
-		window.addEventListener("keydown", this._onTitleKey, true);
 		// One command per screen. Two commands were right when the plugin had
 		// two screens; with five, the palette is how you navigate and three of
 		// them were unreachable from it. Every icon below was probed against the
@@ -178,7 +136,6 @@ class Plugin extends AppPlugin {
 		this._flushStore();
 		this._closeModal();
 		if (this._onFillKey) { window.removeEventListener("keydown", this._onFillKey, true); this._onFillKey = null; }
-		if (this._onTitleKey) { window.removeEventListener("keydown", this._onTitleKey, true); this._onTitleKey = null; }
 		for (const c of this._cmds || []) { try { c.remove(); } catch (e) {} }
 		this._cmds = [];
 		if (this._style) { this._style.remove(); this._style = null; }
@@ -4438,7 +4395,13 @@ class Plugin extends AppPlugin {
 				try { ocfg = tg.col.api.getConfiguration() || {}; } catch (e) { continue; }
 				const paths = (ocfg.fields || []).filter((of) => of.active !== false &&
 					of.type === "record" && of.filter_colguid === f.filter_colguid);
-				if (!paths.length) continue;
+				// NO `if (!paths.length) continue;` here, though it looks like the
+				// obvious guard. The association can live entirely on the other
+				// side — "Employer" on the person, with no Employees-style field
+				// on the company at all — and then the back-references below are
+				// the ONLY path, and the page's own pre-filled values (the
+				// anchors) still deserve to speak. An empty paths just means the
+				// forward loop does nothing.
 				// From whole-name hits AND from partial ones: "Mamdooh" alone is
 				// enough to look up Mamdooh Afdile's company, but a follow from a
 				// partial inherits its weakness and starts unticked.
@@ -5810,82 +5773,6 @@ class Plugin extends AppPlugin {
 		const live = this.data.getRecord(guid) || rec;
 		const { ok } = await this._writeFill(live, byField, true, guid);
 		if (ok) this._toast("Filled " + ok + (ok === 1 ? " field" : " fields") + " from the title of " +
-			(title.length > 40 ? title.slice(0, 40) + "…" : title) + ".");
-	}
-
-	/* ── Enter in the title field ─────────────────────────────────────────
-	 * The same engine, but the trigger is the hand on the keyboard, not the
-	 * moment of creation: title a page, press Enter, and the page fills.
-	 *
-	 * It is a stronger signal than autofill (the user ASKED), so it is not
-	 * restricted to the per-field autofill opt-in; it is the same weaker
-	 * write, though: blanks only, nothing that would replace, and only
-	 * lines the preview would tick on its own. That is also what makes a
-	 * re-trigger harmless: the second run finds the fields already filled
-	 * and does nothing.
-	 *
-	 * `raw` is the text the keydown found IN the input. It gates the run:
-	 * once the title has settled it must still read back as the same text.
-	 * A property input never passes that test, which is the whole point of
-	 * capturing it. An empty `raw` (a title field we could not read text
-	 * from) skips the gate rather than killing the feature. */
-
-	_titleEnterSchedule(guid, raw) {
-		const rec = this.data.getRecord(guid);
-		let title = ""; try { title = rec ? rec.getName() || "" : ""; } catch (e) {}
-		const last = this._titleLast;
-		// One fill per Enter, not one per keydown the OS repeats, and not two
-		// for a double Enter on the same unchanged title.
-		if (last.guid === guid && Date.now() - last.at < 1500 &&
-			last.title === title && last.raw === raw) return;
-		last.guid = guid; last.at = Date.now(); last.title = title; last.raw = raw;
-		setTimeout(() => this._titleEnterCheck(guid, raw, 0, null, 0), 350);
-	}
-
-	_titleEnterCheck(guid, raw, attempt, lastTitle, stable) {
-		const rec = this.data.getRecord(guid);
-		if (!rec) return;
-		let title = ""; try { title = rec.getName() || ""; } catch (e) {}
-		if (!title) {
-			// The commit can lag the keydown by a tick; give it a short leash.
-			if (attempt < 4) setTimeout(() => this._titleEnterCheck(guid, raw, attempt + 1, title, 0), 400);
-			return;
-		}
-		if (title !== lastTitle) {
-			if (attempt < 4) setTimeout(() => this._titleEnterCheck(guid, raw, attempt + 1, title, 0), 400);
-			return;
-		}
-		if (stable < 1) {                       // two matching looks in a row
-			setTimeout(() => this._titleEnterCheck(guid, raw, attempt + 1, title, stable + 1), 400);
-			return;
-		}
-		// The settled title must still be the text that was in the input:
-		// canonical, because the field may normalise what was typed.
-		if (raw && Plugin._fillCanon(title) !== Plugin._fillCanon(raw)) return;
-		this._titleEnterRun(rec, guid, title);
-	}
-
-	async _titleEnterRun(rec, guid, title) {
-		const colGuid = this._recordCollectionGuid(rec);
-		let cols = [];
-		try { cols = await this._collections(); } catch (e) { return; }
-		const ctx = { detached: true, cols, kw: this._loadKeywords(), recCache: {},
-			fillTarget: { rec, guid, title, colGuid },
-			fillOff: new Set(), fillPick: {}, fill: null };
-		try { await this._fillCompute(ctx); } catch (e) { return; }
-		const fill = ctx.fill;
-		if (!fill || fill.status !== "ready") return;
-		const lines = fill.lines.filter((l) => !l.ws && !l.edit && l.defOn && l.mode !== "replace");
-		if (!lines.length) return;
-		const byField = new Map();
-		for (const l of lines) {
-			if (!byField.has(l.fieldId)) byField.set(l.fieldId, { field: l.field, kind: l.kind, adds: [], values: [], edits: [] });
-			byField.get(l.fieldId).adds.push(l.id);
-			byField.get(l.fieldId).values.push(l.value);
-		}
-		const live = this.data.getRecord(guid) || rec;
-		const { ok } = await this._writeFill(live, byField, true, guid);
-		if (ok) this._toast("Filled " + ok + (ok === 1 ? " field" : " fields") + " from " +
 			(title.length > 40 ? title.slice(0, 40) + "…" : title) + ".");
 	}
 

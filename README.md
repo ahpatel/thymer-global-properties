@@ -130,8 +130,6 @@ A word in a title that should select a value the record's own name would not mat
 
 **Autofill at creation** lets chosen fields fill themselves on every new page that is created with a title already in place, while the field is blank and only where the match is sure enough to be ticked on its own. A page created empty is left alone: a title matched while it is still being typed fills the wrong things. The third column says in words what each ticked field will put there.
 
-**Enter in the title** does the same on the page in front of you, on demand. Title the page and press Enter: every field the preview would tick fills itself, blank fields only, nothing replaced. It is a deliberate act, so it does not wait for the per-field opt-in; it is still a quiet one, so a wrong guess can only ever add to an empty field. A title you later retype and press Enter on works the same way.
-
 Fields that can link any record are left out of autofill and say so: searching the whole workspace on every new page is too slow. Run the command on the page instead.
 
 **Shortcut**: ⌘⇧G opens Fill From Title anywhere in Thymer. Click the key field and press new keys to change it.
