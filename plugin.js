@@ -4900,6 +4900,61 @@ class Plugin extends AppPlugin {
 		return (s.fill && s.fill.status === "ready") ? s.fill.lines.filter((l) => this._fillIsOn(l)) : [];
 	}
 
+	/** Take one ticked line back off, from the FILLING summary. Three line
+	 *  kinds, three ways off — mirroring what each row's own tick does. */
+	_fillUntick(line) {
+		const s = this._state;
+		if (line.ws) s.fillPick[line.key] = null;
+		else if (line.edit) {
+			if (line.removed) { line.removed = false; line.id = null; line.name = null; }
+			s.fillOff.add(line.key);
+		} else if (s.fillSel[line.fieldId]) s.fillSel[line.fieldId].delete(line.key);
+		s.pop = null;
+		this._render();
+	}
+
+	/** Everything currently ticked, as one band of chips under the title
+	 *  band: the whole fill in one glance, each value with an × to take it
+	 *  back. Grouped by field — a field's label shows once, on its first
+	 *  chip — in page order, which fill.lines already is. */
+	_fillSummary(parent, picked) {
+		if (!picked.length) return;
+		const band = document.createElement("div");
+		band.className = "gp-fselband";
+		this._add(band, '<div class="gp-fselcaps">FILLING</div>');
+		const chips = document.createElement("div");
+		chips.className = "gp-fselchips";
+		let lastField = null;
+		for (const l of picked) {
+			const field = this._fillFieldOf(l);
+			if (!field) continue;
+			const chip = document.createElement("span");
+			chip.className = "gp-fselchip";
+			// An edit chip says what the CHANGE is: struck for a removal,
+			// old -> new for a swap, the plain value for a proposal.
+			let valHtml;
+			if (l.edit) {
+				if (l.removed) valHtml = '<span class="is-gone">' + this._esc(l.editName || "") + "</span>";
+				else if (l.id) valHtml = this._esc(l.editName || "") +
+					' <span class="gp-fselarrow">\u2192</span> ' + this._esc(l.name || "");
+				else valHtml = this._esc(l.editName || "");
+			} else valHtml = this._esc(l.name || "");
+			chip.innerHTML = (field.id !== lastField
+				? '<span class="gp-fselfield">' + this._esc(field.label) + "</span>" : "") +
+				'<span class="gp-fselval">' + this._fillIcon(l, l.edit ? (l.id || undefined) : undefined) + valHtml + "</span>";
+			lastField = field.id;
+			const x = document.createElement("button");
+			x.className = "gp-fselx";
+			x.textContent = "×";
+			x.setAttribute("data-gptip", l.edit ? "Drop this change" : "Do not fill this");
+			x.addEventListener("click", () => this._fillUntick(l));
+			chip.appendChild(x);
+			chips.appendChild(chip);
+		}
+		band.appendChild(chips);
+		parent.appendChild(band);
+	}
+
 	/** The icon beside a proposed or held value: the record's own, else its
 	 *  collection's; an option's own if it has one. Resolved once per line. */
 	_fillIcon(line, id) {
@@ -5028,6 +5083,7 @@ class Plugin extends AppPlugin {
 			return;
 		}
 		this._fillEnsureSel();
+		this._fillSummary(body, this._fillPicked());
 		const groups = this._fillGroups();
 		const loose = fill.lines.filter((l) => l.ws);
 		const edits = fill.lines.filter((l) => l.edit);
@@ -5206,33 +5262,76 @@ class Plugin extends AppPlugin {
 		const pop = document.createElement("div");
 		pop.className = "gp-pop gp-fpop";
 		pop.addEventListener("click", (e) => e.stopPropagation());
-		this._add(pop, '<div class="gp-fpopnote">' +
-			(cur.length && !g.field.many ? "Ticking this replaces " + this._esc(cur.map((c) => c.name).join(", ")) + ". " : "") +
-			(g.cands.length > 1 ? "Other matches for " : "Matches for ") + this._esc(g.field.label) + ":</div>");
-		const list = document.createElement("div");
-		list.className = "gp-fpoplist";
+		if (cur.length && !g.field.many) {
+			this._add(pop, '<div class="gp-fpopnote">Ticking this replaces ' +
+				this._esc(cur.map((c) => c.name).join(", ")) + ".</div>");
+		}
+		// Date-only pickers have nothing to search: the proposals are the picker.
+		if (!g.cands.some((l) => l.kind !== "date")) {
+			const list = document.createElement("div");
+			list.className = "gp-fpoplist";
+			for (const l of g.cands) {
+				const why = this._fillWhy(l);
+				const b = document.createElement("button");
+				b.className = "gp-fpoprow" + (sel.has(l.key) ? " is-on" : "");
+				b.innerHTML = '<span class="gp-fpoplabel">' + this._fillIcon(l) + "<span>" + this._esc(l.name) + '</span></span><span class="gp-fpopmeta">' + this._esc(why.text) + "</span>";
+				b.addEventListener("click", () => this._fillPickCand(g, l));
+				list.appendChild(b);
+			}
+			pop.appendChild(list);
+			return pop;
+		}
+		// THE SEARCH LEADS, and one query filters BOTH groups: the matcher's
+		// proposals first (a ticked one stays visible whatever you type, so
+		// what Fill will write never leaves the page), then the field's whole
+		// target collection. Focus lands in the box (gp-popsearch), so open,
+		// glance, type is one motion.
+		const kind = g.field.type === "choice" ? "choice" : "record";
+		const w = document.createElement("div");
+		w.className = "gp-fpopsearch";
+		this._popSearch(w, kind === "choice" ? "Search options…" : "Search records…",
+			s.popQ, (v) => { s.popQ = v; this._render(); });
+		pop.appendChild(w);
+		const q = s.popQ || "";
+		const pinned = [], rest = [];
 		for (const l of g.cands) {
-			const why = this._fillWhy(l);
-			const b = document.createElement("button");
-			b.className = "gp-fpoprow" + (sel.has(l.key) ? " is-on" : "");
-			b.innerHTML = '<span class="gp-fpoplabel">' + this._fillIcon(l) + "<span>" + this._esc(l.name) + '</span></span><span class="gp-fpopmeta">' + this._esc(why.text) + "</span>";
-			b.addEventListener("click", () => this._fillPickCand(g, l));
-			list.appendChild(b);
+			if (q && !sel.has(l.key) && this._matchScore(l.name, q) <= 0) continue;
+			(sel.has(l.key) ? pinned : rest).push(l);
 		}
-		pop.appendChild(list);
-		// Search, below the matches: the fix for "close but wrong".
-		if (g.cands.some((l) => l.kind !== "date")) {
-			const more = this._fillSearchPop(g.field, g.field.type === "choice" ? "choice" : "record",
-				(id, name) => this._fillAddCand(g, id, name), null, null, true);
-			pop.appendChild(more);
+		const head = (label) => {
+			const h = document.createElement("div");
+			h.className = "gp-fpophead";
+			this._add(h, '<div class="gp-caps-s">' + this._esc(label) + "</div>");
+			pop.appendChild(h);
+		};
+		if (pinned.length || rest.length) {
+			head("FROM THE TITLE");
+			const list = document.createElement("div");
+			list.className = "gp-fpoplist";
+			for (const l of pinned.concat(rest)) {
+				const why = this._fillWhy(l);
+				const b = document.createElement("button");
+				b.className = "gp-fpoprow" + (sel.has(l.key) ? " is-on" : "");
+				b.innerHTML = '<span class="gp-fpoplabel">' + this._fillIcon(l) + "<span>" + this._esc(l.name) + '</span></span><span class="gp-fpopmeta">' + this._esc(why.text) + "</span>";
+				b.addEventListener("click", () => this._fillPickCand(g, l));
+				list.appendChild(b);
+			}
+			pop.appendChild(list);
 		}
+		const target = kind === "record" && g.field.filter_colguid
+			? (s.cols || []).find((c) => c.guid === g.field.filter_colguid) : null;
+		head(kind === "choice" ? "ALL OPTIONS" : (target ? "ALL " + target.name.toUpperCase() : "EVERYWHERE"));
+		pop.appendChild(this._fillSearchPop(g.field, kind,
+			(id, name) => this._fillAddCand(g, id, name), null, null, true, true));
 		return pop;
 	}
 
 	/** A search picker over a field's target collection (or the workspace
 	 *  pool for a field that links anywhere), or its options for a choice
-	 *  field. `bare` returns just the search + list, to nest under matches. */
-	_fillSearchPop(field, kind, onPick, markId, markText, bare) {
+	 *  field. `bare` returns just the search + list, to nest under matches;
+	 *  `skipSearch` drops the search box, for a picker whose box sits above
+	 *  both groups. */
+	_fillSearchPop(field, kind, onPick, markId, markText, bare, skipSearch) {
 		const s = this._state, fill = s.fill;
 		const pop = document.createElement("div");
 		pop.className = bare ? "gp-fpopmore" : "gp-pop gp-fpop";
@@ -5253,11 +5352,13 @@ class Plugin extends AppPlugin {
 			else { isWs = true; opts = (fill.wsItems || []).map((it) => ({ label: it.name, guid: it.id, meta: it.colName,
 				icon: it.colGuid ? this._colIconFor(it.colGuid) : "" })); }
 		}
-		const w = document.createElement("div");
-		w.className = "gp-fpopsearch";
-		this._popSearch(w, kind === "choice" ? "Search options…" : (isWs ? "Search the workspace…" : "Search records…"),
-			s.popQ, (v) => { s.popQ = v; this._render(); });
-		pop.appendChild(w);
+		if (!skipSearch) {
+			const w = document.createElement("div");
+			w.className = "gp-fpopsearch";
+			this._popSearch(w, kind === "choice" ? "Search options…" : (isWs ? "Search the workspace…" : "Search records…"),
+				s.popQ, (v) => { s.popQ = v; this._render(); });
+			pop.appendChild(w);
+		}
 		const list = document.createElement("div");
 		list.className = "gp-fpoplist";
 		const q = s.popQ || "";
@@ -5273,7 +5374,7 @@ class Plugin extends AppPlugin {
 				list.appendChild(b);
 			}
 			if (!ranked.length) this._add(list, '<div class="gp-fpopempty">' +
-				(isWs && !q ? "Type to search every record." : (bare && !q ? "Type to search for another." : "Nothing matches.")) + "</div>");
+				(isWs && !q ? "Type to search every record." : (bare && !q ? "Nothing here yet." : "Nothing matches.")) + "</div>");
 		}
 		pop.appendChild(list);
 		return pop;
@@ -7057,6 +7158,26 @@ class Plugin extends AppPlugin {
 .gp-fpopmeta { font-size: 11px; line-height: 14px; white-space: nowrap; color: var(--gp-text-dim); min-width: 0; max-width: 55%; overflow: hidden; text-overflow: ellipsis; flex: none; }
 .gp-fpoprow.is-on .gp-fpopmeta { color: inherit; }
 .gp-fpopempty { padding: 10px 12px; font-size: 12.5px; color: var(--gp-text-dim); font-family: var(--gp-font); }
+/* group headers inside a candidate picker: proposals, then the collection */
+.gp-fpophead { padding: 10px 12px 0; }
+.gp-fpopmore .gp-fpophead { padding-top: 4px; }
+/* the FILLING band: every ticked value as one chip, × to take it back */
+.gp-fselband { display: flex; align-items: baseline; gap: 12px; padding: 2px 0 10px; }
+.gp-fselcaps { font-weight: 500; font-size: 10px; line-height: 13px; letter-spacing: .14em; color: var(--gp-text-dim); white-space: nowrap; }
+.gp-fselchips { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
+.gp-fselchip {
+	display: inline-flex; align-items: center; gap: 7px; padding: 5px 8px 5px 10px;
+	background: var(--gp-surface-chip); border: 1px solid var(--gp-rule);
+	border-radius: 4px; max-width: 100%;
+}
+.gp-fselfield { font-weight: 500; font-size: 10.5px; line-height: 14px; letter-spacing: .1em; text-transform: uppercase; color: var(--gp-text-dim); }
+.gp-fselval { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; font-size: 12.5px; line-height: 16px; color: var(--gp-accent-text); min-width: 0; }
+.gp-fselval > span:not(.gp-colicon) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gp-fselval .gp-colicon { flex: none; }
+.gp-fselx { font-size: 13px; line-height: 1; color: var(--gp-text-dim); padding: 0 0 0 2px; }
+.gp-fselx:hover { color: var(--gp-text); }
+.gp-fselval .is-gone { color: var(--gp-text-dim); text-decoration: line-through; }
+.gp-fselarrow { color: var(--gp-text-dim); }
 /* footer: links left, count + actions right */
 .gp-ffootlinks { display: flex; align-items: center; gap: 16px; }
 .gp-flink { font-weight: 500; font-size: 12.5px; color: var(--gp-accent-text); padding: 4px 2px; border-radius: 4px; }

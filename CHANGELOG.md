@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.7.0, 2026-08-27
+
+**Corrections, one motion.** Guesses are only as good as their correction, so the picker and the dialog now both put what will be written in reach.
+
+- **The search leads.** Open a field's picker and the cursor is already in its search box, at the top. One query filters both groups at once: the matcher's proposals ("from the title", ticks and all) and the field's whole collection below ("all People", "all Companies", "all Options"). A ticked candidate stays visible whatever you type, so what Fill will write never leaves the page while you look for something better.
+- **Filling, in one glance.** Under the title band, every ticked value now sits as a chip grouped by field, each with an × to take it back — including the changes made under "On this page", struck for a removal, old → new for a swap. The band updates as you tick, and the footer count and Fill button follow.
+
 ## v1.6.0, 2026-08-27
 
 **Common names, resolved through what the title already matched.** "USDA meeting with Keith": the org comes in by abbreviation, and now the Keith who belongs to USDA comes ticked — however many Keiths the workspace holds.

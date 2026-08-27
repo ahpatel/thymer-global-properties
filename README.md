@@ -106,7 +106,9 @@ Four things become a proposal:
 - **An abbreviation of a record's name**, derived from the name itself, nothing to maintain. `EPA` finds *Environmental Protection Agency*, `JLL` finds *Jones Lang LaSalle*, `DOE` finds *Department of Energy* — both ways English shortens, with or without the little words. An abbreviation only one record could mean comes ticked; one several records share comes unticked, like a partial match.
 - **A date written in the title**, read the way Thymer reads it. `imorgon`, `nästa fredag`, `2026-05-12`, `May 12 at 14:00`. A month or a year alone is never a date, so a page called "Chimney Yard Party 2026" keeps its own.
 
-One row per field. The chevron beside a value opens the other candidates, along with a search for anything the matcher never proposed, so a proposal that is close but wrong takes one click to correct. Multi-value fields add and never replace, and a single-value field that already holds something says what ticking it would displace.
+One row per field. The chevron beside a value opens the field's picker with the cursor already in its search box: type and one query filters both of its groups — **from the title**, the matcher's proposals with their tick states, and **all** of the collection the field links to (or its options). A ticked candidate stays visible however you filter, so what Fill will write never leaves the page, and anything the matcher never proposed is a search away. Multi-value fields add and never replace, and a single-value field that already holds something says what ticking it would displace.
+
+**Filling** sits under the title band: every ticked value as one chip, grouped by field, each with an × to take it back — the whole fill in one glance, before Enter or Fill commits it.
 
 **Enter fills.** With the dialog open, press Enter and the ticked values are written, wherever the focus sits — right after the shortcut chord it is still in the editor, and that is where the hand already is. A popover open, or a button, link or input focused inside the dialog, keeps Enter for itself.
 
