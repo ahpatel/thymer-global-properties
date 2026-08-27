@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.4.0, 2026-08-27
+
+Two keyboard answers to "why is the hand back on the mouse".
+
+- **Enter applies in Fill From Title.** With the dialog open, Enter writes the ticked values, wherever the focus sits. Right after the shortcut chord the focus is still in the editor, so the whole trip is ⌘⇧G, glance, Enter. A popover open, or a button, link or input focused inside the dialog, keeps Enter for itself, so the pickers and searches work exactly as before.
+- **Enter in the title field fills the page.** Title a page and press Enter, and every field the preview would tick fills itself: blanks only, nothing replaced, and only lines sure enough to be ticked on their own. It runs the moment you ask, not on creation, so a page that started empty and was typed into is no longer left to the command. The trigger is identified the only way it can be from outside: an input at the top of the panel whose text is the page title. A property input in the same spot holds a property value, and its text never matches the title, so it can never fire the fill.
+
+Both rides reuse the same write the Fill button uses, with the autofill contract (never replace, verify after write), so a wrong guess can only ever add to an empty field, and a second Enter finds nothing left to do.
+
 ## v1.3.1, 2026-08-24
 
 Fill From Title, after four days of "the ticked value was not saved" that turned out to be three different things.

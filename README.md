@@ -102,10 +102,12 @@ Four things become a proposal:
 
 - **A record whose name is in the title**, matched against the collection that field links to. Punctuation and spacing do not have to agree, so `Konst&Kulturakademin` finds *Konst & Kulturakademin*.
 - **An option whose label is in the title**, or one of your aliases for it.
-- **What a matched record itself points at**: the company a matched person works at, the habitat a matched company sits in. Records already linked on the page count as matches too, so a person you linked by hand still brings their company.
+- **What a matched record itself points at**: the company a matched person works at, the people a matched company employs, the habitat a matched company sits in. Records already linked on the page count as matches too, so a person you linked by hand still brings their company.
 - **A date written in the title**, read the way Thymer reads it. `imorgon`, `nästa fredag`, `2026-05-12`, `May 12 at 14:00`. A month or a year alone is never a date, so a page called "Chimney Yard Party 2026" keeps its own.
 
 One row per field. The chevron beside a value opens the other candidates, along with a search for anything the matcher never proposed, so a proposal that is close but wrong takes one click to correct. Multi-value fields add and never replace, and a single-value field that already holds something says what ticking it would displace.
+
+**Enter fills.** With the dialog open, press Enter and the ticked values are written, wherever the focus sits — right after the shortcut chord it is still in the editor, and that is where the hand already is. A popover open, or a button, link or input focused inside the dialog, keeps Enter for itself.
 
 **Fits several fields** collects records that match a field which can link anything, where the record is certain and the field is the question. Pick the field and the row can be written.
 
@@ -124,6 +126,8 @@ A word in a title that should select a value the record's own name would not mat
 ![Fill In Settings](Assets/fill-in-settings.png)
 
 **Autofill at creation** lets chosen fields fill themselves on every new page that is created with a title already in place, while the field is blank and only where the match is sure enough to be ticked on its own. A page created empty is left alone: a title matched while it is still being typed fills the wrong things. The third column says in words what each ticked field will put there.
+
+**Enter in the title** does the same on the page in front of you, on demand. Title the page and press Enter: every field the preview would tick fills itself, blank fields only, nothing replaced. It is a deliberate act, so it does not wait for the per-field opt-in; it is still a quiet one, so a wrong guess can only ever add to an empty field. A title you later retype and press Enter on works the same way.
 
 Fields that can link any record are left out of autofill and say so: searching the whole workspace on every new page is too slow. Run the command on the page instead.
 
