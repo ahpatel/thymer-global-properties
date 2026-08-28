@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.9.1, 2026-08-28
+
+Three small finds from the two-axis review (standards × spec), plus one it only pointed at.
+
+- **The caret stays where you put it.** A fix typed mid-query used to be thrown to the end of the search box by the re-render it triggered. The position is remembered now and restored after every redraw, clamped to the query's length.
+- **Dead plural branches cut.** Two ternaries whose both arms were identical ("1 more to choose from" and "did not save") are plain strings.
+- **Stores are looked up by key, not by slot.** `_tplStore()` was `_stagedStores()[0]` — positional coupling with no reason to exist.
+- **ADR-0001 gains one sentence**: the engine's `_init` stamp on pool items is scratch it built itself, not shared state — closing the review's only "mutates nothing" question.
+
 ## v1.9.0, 2026-08-28
 
 An architecture pass: same behaviour, concentrated implementation. No user-visible change — every screen, key and write behaves exactly as 1.8.0 did.

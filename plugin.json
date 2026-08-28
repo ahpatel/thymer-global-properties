@@ -1,6 +1,6 @@
 {
 	"ver": 1,
-	"version": "1.9.0",
+	"version": "1.9.1",
 	"name": "Global Properties",
 	"icon": "ti-align-left",
 	"description": "Reuse properties across collections. Add any property from anywhere in the workspace to any other collection, or save a whole set as a template and apply it in a couple of clicks. Copies the full definition: type, icon, multi-value, choice options and their colours, number format, and which collection a linked-record property points at. It also decides what new records start with: values inherited from the record you created them inside, and fixed defaults per field. Adding is purely additive and skips any property whose name the target already uses; the one thing it can change is the order you place the new fields in. Fill From Title reads the title of the page you are on and proposes values for its fields: records and options whose name appears in it, what a matched record itself points at, and dates written in it. You tick what is right, and chosen fields can fill themselves on every new page created with a title."
