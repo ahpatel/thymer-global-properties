@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.9.2, 2026-08-28
+
+Two fixes on top of the merge, both found while testing 1.9.1 on real pages.
+
+- **Clicking beside a picker closes it.** The dismiss test freed the whole row cell that the picker hangs from, not the picker itself. A row cell is wide, so the value, the space beside it and "N more to choose from" formed a dead strip directly above the open picker, and clicking there, which is the most natural way to dismiss it, closed nothing. Only the picker is safe ground now. The controls that toggle a picker are still let through, so clicking a chevron or "N more to choose from" a second time closes its own picker rather than reopening it.
+- **Fill From Title no longer hangs when there is no page in front of you.** The screen sets its loading card before it asks for a proposal, so the "nothing to fill" branch was guarded on a condition that could never be true and the card stayed up forever. It reports "no target" now, as it always meant to.
+
 ## v1.9.1, 2026-08-28
 
 Three small finds from the two-axis review (standards × spec), plus one it only pointed at.

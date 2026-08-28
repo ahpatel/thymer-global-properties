@@ -819,13 +819,19 @@ class Plugin extends AppPlugin {
 			if (!s || !s.pop) return;
 			const tgt = e.target;
 			if (!tgt || !tgt.closest) return;
-			// Only the anchor that OWNS the open popover is safe ground; every
-			// row on the fill screens is an anchor, and treating them all as
-			// safe meant a click in another row closed nothing. A trigger is
-			// also let through: its own click handler switches the popover.
-			const a = tgt.closest(".gp-anchor");
-			if (a && a.querySelector(".gp-pop")) return;
-			if (tgt.closest(".gp-fchevbtn, .gp-ffieldpick, .gp-kaddbtn, .gp-trigger, .gp-dashed, .gp-costcell")) return;
+			// The POPOVER is safe ground, and nothing else is. This used to free
+			// the whole .gp-anchor that held the popover, which sounds the same
+			// and is not: an anchor is the row's entire value cell, so the
+			// value, the empty space beside it and "N more to choose from" all
+			// sat in a dead strip directly above the picker, and clicking there
+			// -- the most natural way to dismiss it -- closed nothing.
+			// (Freeing EVERY anchor is the other wrong answer: every row on the
+			// fill screens is one, so a click in another row would close nothing
+			// either.) A trigger is let through so its own click handler can do
+			// the toggling, which is how clicking a chevron a second time closes
+			// its own popover instead of reopening it.
+			if (tgt.closest(".gp-pop")) return;
+			if (tgt.closest(".gp-fchevbtn, .gp-fmoreline, .gp-ffieldpick, .gp-kaddbtn, .gp-trigger, .gp-dashed, .gp-costcell")) return;
 			s.pop = null; s.popAdd = false;
 			this._render();
 		};
@@ -4698,13 +4704,12 @@ class Plugin extends AppPlugin {
 	async _fillCompute() {
 		const s = this._state;
 		if (!s) return;
-		// No page in front of the user: not an excuse to spin. _renderFill only
-		// schedules a compute while s.fill is unset, so a bare return here would
-		// leave the loading card up forever.
-		if (!s.fillTarget) {
-			if (!s.fill) { s.fill = { status: "notarget" }; this._render(); }
-			return;
-		}
+		// No page in front of the user: not an excuse to spin. _renderFill sets
+		// s.fill to the loading card BEFORE it schedules this, so s.fill is
+		// always truthy by the time we get here; guarding this on `!s.fill`
+		// made the notarget branch dead and left "Reading the collections this
+		// page links to" up forever. Set it unconditionally.
+		if (!s.fillTarget) { s.fill = { status: "notarget" }; this._render(); return; }
 		const target = s.fillTarget;
 		let fill = null;
 		try {
