@@ -86,9 +86,7 @@ class Plugin extends AppPlugin {
 	_onFillKey = null;
 	_ovl = null;
 	_state = null;
-	_pending = null;
-	_pendingRules = null;
-	_pendingKw = null;
+	_staged = null;
 	_rulesCache = null;
 
 	onLoad() {
@@ -148,94 +146,132 @@ class Plugin extends AppPlugin {
 	}
 
 	// ══════════════════════════════════════════════════════════════════════
-	// Store
+	// Store: one staged-store mechanism, three configurations of it
 	// ══════════════════════════════════════════════════════════════════════
-
-	_lsKey() { return Plugin.LS_PREFIX + this.getWorkspaceGuid(); }
-
-	/** Read the template store. Config is authoritative; localStorage wins only
-	 *  when it is strictly newer (a config write that never landed). */
-	_loadStore() {
-		let fromCfg = null, fromLs = null;
-		try {
-			const cfg = this.getConfiguration();
-			fromCfg = (cfg && cfg.custom && cfg.custom.property_templates) || null;
-		} catch (e) {}
-		try { fromLs = JSON.parse(localStorage.getItem(this._lsKey()) || "null"); } catch (e) {}
-		const empty = { rev: 0, templates: [] };
-		const a = fromCfg && Array.isArray(fromCfg.templates) ? fromCfg : empty;
-		const b = fromLs && Array.isArray(fromLs.templates) ? fromLs : empty;
-		const win = (b.rev || 0) > (a.rev || 0) ? b : a;
-		return { rev: win.rev || 0, templates: (win.templates || []).slice() };
-	}
-
-	/* Saving the store has to happen in TWO stages, because saveConfiguration()
+	//
+	// Templates, Fill keywords and Inherited/Default rules all persist the
+	// same way, so the mechanism lives here once and each store is a
+	// configuration of it: a config key (authoritative, syncs across
+	// devices), a per-workspace localStorage mirror, and a load that prefers
+	// whichever side is strictly newer by `rev`.
+	//
+	/* Saving has to happen in TWO stages, because saveConfiguration()
 	 * reloads the plugin and a reload tears down whatever dialog is open. That
 	 * used to mean every save threw you back into Thymer mid-task.
 	 *
-	 *   _stageStore  writes localStorage immediately and remembers the change
-	 *   _flushStore  writes the plugin config, and is called when the dialog
-	 *                closes, so the reload lands on an empty screen
+	 *   stage   writes localStorage immediately and remembers the change
+	 *   flush   writes the plugin config, called when the dialog closes, so
+	 *           the reload lands on an empty screen
 	 *
-	 * Nothing is at risk in between: localStorage carries the newer `rev`, and
-	 * _loadStore prefers whichever side is newer, so an app that dies before
-	 * the flush still comes back with the change. */
-	_stageStore(next, rules) {
-		next.rev = Date.now();
-		this._pending = next;
-		if (rules) { rules.rev = next.rev; this._pendingRules = rules; this._rulesCache = rules; }
-		try { localStorage.setItem(this._lsKey(), JSON.stringify(next)); } catch (e) {}
-		return next;
+	 * Nothing is at risk in between: localStorage carries the newer `rev`,
+	 * and read prefers whichever side is newer, so an app that dies before
+	 * the flush still comes back with the change. All pending stores leave in
+	 * ONE config write, because every write reloads the plugin. */
+
+	_makeStagedStore(cfgKey, lsPrefix, empty, normalise) {
+		const self = this;
+		const lsKey = lsPrefix ? lsPrefix + self.getWorkspaceGuid() : null;
+		const store = {
+			cfgKey, lsKey, pending: null,
+			read() {
+				let fromCfg = null, fromLs = null;
+				try { fromCfg = normalise((self.getConfiguration().custom || {})[cfgKey]); } catch (e) {}
+				if (lsKey) { try { fromLs = normalise(JSON.parse(localStorage.getItem(lsKey) || "null")); } catch (e) {} }
+				const a = fromCfg || empty, b = fromLs || empty;
+				const win = (b.rev || 0) > (a.rev || 0) ? b : a;
+				return win === empty ? JSON.parse(JSON.stringify(empty)) : win;
+			},
+			stage(next) {
+				next.rev = Date.now();
+				store.pending = next;
+				if (lsKey) { try { localStorage.setItem(lsKey, JSON.stringify(next)); } catch (e) {} }
+				return next;
+			},
+			drop() { store.pending = null; },
+		};
+		return store;
+	}
+
+	_stagedStores() {
+		if (!this._staged) {
+			this._staged = [
+				// The config key stays `property_templates` even though the plugin is
+				// now called Global Properties: renaming it would orphan every template
+				// already saved. Same reason the localStorage key keeps its pt_ prefix.
+				this._makeStagedStore("property_templates", Plugin.LS_PREFIX,
+					{ rev: 0, templates: [] }, Plugin._normaliseTemplates),
+				this._makeStagedStore(Plugin.KW_KEY, Plugin.KW_LS,
+					// The full shape even when empty — HEAD's load always returned
+					// auto and shortcut keys, and consumers may lean on that.
+					{ rev: 0, map: {}, auto: {}, shortcut: null }, Plugin._normaliseKeywords),
+				// Rules carry no localStorage mirror of their own: they are staged
+				// through the shared flush and recovered by nothing but the config.
+				this._makeStagedStore(Plugin.RULES_KEY, null,
+					{ rev: 0, enabled: false, blocklist: [], rules: [] }, Plugin._normaliseRules),
+			];
+		}
+		return this._staged;
+	}
+
+	_tplStore() { return this._stagedStores().find((st) => st.cfgKey === "property_templates"); }
+	_kwStore() { return this._stagedStores().find((st) => st.cfgKey === Plugin.KW_KEY); }
+	_rulesStore() { return this._stagedStores().find((st) => st.cfgKey === Plugin.RULES_KEY); }
+
+	/** Each store's shape check and normalisation, on load. A side that is not
+	 *  the store's shape reads as absent, which is how an empty workspace and
+	 *  a corrupted key behave identically. */
+	static _normaliseTemplates(raw) {
+		return (raw && Array.isArray(raw.templates))
+			? { rev: raw.rev || 0, templates: raw.templates.slice() } : null;
+	}
+
+	static _normaliseKeywords(raw) {
+		if (!raw || !raw.map) return null;
+		// `auto` (colGuid -> [fieldIds] that fill themselves when a new record
+		// arrives WITH a title) and `shortcut` (the Fill From Title chord) rode
+		// in later, 1.3.0-dev. Deep-cloned so a caller's mutations never leak
+		// into the config or the mirror.
+		return { rev: raw.rev || 0,
+			map: JSON.parse(JSON.stringify(raw.map)),
+			auto: JSON.parse(JSON.stringify(raw.auto || {})),
+			shortcut: raw.shortcut ? JSON.parse(JSON.stringify(raw.shortcut)) : null };
+	}
+
+	static _normaliseRules(raw) {
+		return (raw && Array.isArray(raw.rules)) ? raw : null;
+	}
+
+	_loadStore() { return this._tplStore().read(); }
+	_loadKeywords() { return this._kwStore().read(); }
+	_loadRules() { return this._rulesStore().read(); }
+
+	_stageStore(next) { return this._tplStore().stage(next); }
+
+	_stageKeywords(kw) {
+		const out = this._kwStore().stage(kw);
+		this._fillKw = kw;                 // the shortcut listener reads this cache
+		return out;
 	}
 
 	async _flushStore() {
-		const next = this._pending, rules = this._pendingRules, kw = this._pendingKw;
-		if (!next && !rules && !kw) return false;
-		this._pending = null;
-		this._pendingRules = null;
-		this._pendingKw = null;
+		const pending = this._stagedStores().filter((st) => st.pending)
+			.map((st) => ({ cfgKey: st.cfgKey, next: st.pending }));
+		if (!pending.length) return false;
+		for (const st of this._stagedStores()) st.pending = null;
 		const mine = (await this.data.getAllGlobalPlugins() || [])
 			.find((p) => p.getGuid() === this.getGuid());
 		if (!mine) return false;
 		const cfg = JSON.parse(JSON.stringify(this.getConfiguration()));
 		cfg.custom = Object.assign({}, cfg.custom || {});
-		// The config key stays `property_templates` even though the plugin is
-		// now called Global Properties: renaming it would orphan every template
-		// already saved. Same reason the localStorage key keeps its pt_ prefix.
-		if (next) cfg.custom.property_templates = next;
-		if (rules) cfg.custom[Plugin.RULES_KEY] = rules;
-		if (kw) cfg.custom[Plugin.KW_KEY] = kw;
+		for (const p of pending) cfg.custom[p.cfgKey] = p.next;
 		return await mine.saveConfiguration(cfg);
 	}
 
 	/* Fill From Title keywords: per collection, per choice field, per option, a
 	 * list of words or phrases that select that option when found in a title
-	 * ("Möte" -> Contact Log). Same two-stage save as everything else here. */
+	 * ("Möte" -> Contact Log). Same staged store as everything else here. */
 	static KW_KEY = "fill_keywords";
 	static KW_LS = "pt_fillkw_v1_";
-
-	_loadKeywords() {
-		let a = null, b = null;
-		try { a = (this.getConfiguration().custom || {})[Plugin.KW_KEY] || null; } catch (e) {}
-		try { b = JSON.parse(localStorage.getItem(Plugin.KW_LS + this.getWorkspaceGuid()) || "null"); } catch (e) {}
-		const empty = { rev: 0, map: {} };
-		a = a && a.map ? a : empty; b = b && b.map ? b : empty;
-		const win = (b.rev || 0) > (a.rev || 0) ? b : a;
-		// `auto` (colGuid -> [fieldIds] that fill themselves when a new record
-		// arrives WITH a title) and `shortcut` (the Fill From Title chord) rode
-		// in later, 1.3.0-dev.
-		return { rev: win.rev || 0, map: JSON.parse(JSON.stringify(win.map || {})),
-			auto: JSON.parse(JSON.stringify(win.auto || {})),
-			shortcut: win.shortcut ? JSON.parse(JSON.stringify(win.shortcut)) : null };
-	}
-
-	_stageKeywords(kw) {
-		kw.rev = Date.now();
-		this._pendingKw = kw;
-		this._fillKw = kw;                 // the shortcut listener reads this cache
-		try { localStorage.setItem(Plugin.KW_LS + this.getWorkspaceGuid(), JSON.stringify(kw)); } catch (e) {}
-		return kw;
-	}
 
 	// ══════════════════════════════════════════════════════════════════════
 	// Collections and fields
@@ -345,14 +381,25 @@ class Plugin extends AppPlugin {
 	}
 
 	/* Every popover search: focus survives the re-render that each keystroke
-	 * causes, with the caret left at the end. Without this the field loses focus
-	 * after one character, because typing re-renders the whole panel and builds
-	 * a brand new input. */
+	 * causes, and so does the CARET POSITION. Without the position, a fix typed
+	 * mid-query was thrown back to the end of the field by the very re-render
+	 * it triggered. Without this the field loses focus after one character,
+	 * because typing re-renders the whole panel and builds a brand new input. */
 	_popSearch(parent, placeholder, value, onInput) {
-		const inp = this._search(parent, placeholder, value, onInput);
+		const inp = this._search(parent, placeholder, value, (v) => {
+			try { this._state.popQAt = inp.selectionStart; } catch (e) {}
+			onInput(v);
+		});
 		inp.classList.add("gp-popsearch");
 		setTimeout(() => {
-			try { inp.focus(); inp.setSelectionRange(inp.value.length, inp.value.length); } catch (e) {}
+			try {
+				inp.focus();
+				// Clamped: a position remembered from a previous popover session
+				// can exceed a fresh, shorter query.
+				const at = Math.min(this._state.popQAt != null ? this._state.popQAt : inp.value.length,
+					inp.value.length);
+				inp.setSelectionRange(at, at);
+			} catch (e) {}
 		}, 0);
 		return inp;
 	}
@@ -819,7 +866,24 @@ class Plugin extends AppPlugin {
 				this._render();
 				return;
 			}
-			if (e.key !== "Escape") return;
+			if (e.key !== "Escape") {
+				// Enter applies the ticked values on the Fill screen, wherever
+				// focus sits: the hand has just come off the shortcut chord, so
+				// it is still in the editor behind the dialog. A popover open
+				// -> Enter belongs to the picker. A button, link or input
+				// focused inside the dialog -> Enter belongs to that control.
+				if (e.key !== "Enter" || !st || st.screen !== "fill" || st.busy || st.pop) return;
+				const tgt = e.target;
+				if (!tgt || tgt.nodeType !== 1) return;
+				if (this._ovl && this._ovl.contains(tgt) && tgt.closest &&
+					tgt.closest("button, a, input, textarea, select")) return;
+				const picked = this._fillPicked();
+				if (!picked.length) return;
+				e.preventDefault();
+				e.stopPropagation();
+				this._doFill(picked);
+				return;
+			}
 			e.preventDefault();
 			e.stopPropagation();
 			this._closeModal();
@@ -1510,15 +1574,8 @@ class Plugin extends AppPlugin {
 	 * properties on the same event is how data got corrupted before. */
 	static RULES_KEY = "property_rules";
 
-	_loadRules() {
-		let r = null;
-		try {
-			const cfg = this.getConfiguration();
-			r = (cfg && cfg.custom && cfg.custom[Plugin.RULES_KEY]) || null;
-		} catch (e) {}
-		return r && Array.isArray(r.rules)
-			? r : { rev: 0, enabled: false, blocklist: [], rules: [] };
-	}
+	// `_loadRules` lives with the staged stores (one mechanism, three
+	// configurations); this section only owns RULES_KEY and the import.
 
 	/** The installed Auto-Init plugin, found by the shape of its config rather
 	 *  than by name, so a renamed install is still recognised. */
@@ -1619,7 +1676,10 @@ class Plugin extends AppPlugin {
 		const next = this._migrateAutoInit(found.ai);
 		s.rules = next;
 		s.vModel = null;
-		this._stageStore(this._loadStore(), next);
+		// Stage rules alone: the old piggyback re-stamped the template store's
+		// rev for identical content. The creation engine's cache follows.
+		this._rulesStore().stage(next);
+		this._rulesCache = next;
 		s.busy = false;
 		this._render();
 		this._toast("Imported " + next.rules.length + " rules. " +
@@ -2357,11 +2417,12 @@ class Plugin extends AppPlugin {
 		this._quiet(acts, "Cancel", () => {
 			// Drop the staged rules before closing, or _closeModal would flush
 			// the very edits Cancel just discarded. Not after a Save, though:
-			// _pendingRules then holds that SAVED state, because an edit only
+			// The rules store's pending then holds that SAVED state, because an
+			// edit only
 			// touches the scratch model and never re-stages. Clearing it there
 			// would throw away a save the note had already confirmed, and only
 			// the localStorage mirror's newer rev would have got it back.
-			if (!s.vSaved) this._pendingRules = null;
+			if (!s.vSaved) this._rulesStore().drop();
 			s.vDirty = false;
 			this._closeModal();
 		});
@@ -2373,7 +2434,8 @@ class Plugin extends AppPlugin {
 		const s = this._state;
 		s.rules.rules = this._modelToRules(s.vModel);
 		s.rules.blocklist = s.vModel.blocklist.slice();
-		this._stageStore(this._loadStore(), s.rules);
+		this._rulesStore().stage(s.rules);
+		this._rulesCache = s.rules;
 		s.vDirty = false;
 		s.vSaved = true;
 		this._render();
@@ -3920,6 +3982,18 @@ class Plugin extends AppPlugin {
 	static FILL_MIN_CHARS = 3;
 	static FILL_PARTIAL_MAX = 3;
 
+	/* Initialisms that business titles use for the JOB, not the record.
+	 * "CEO sync" means the meeting, not the person whose initials spell
+	 * CEO; the initialism of "Carl Erik Olsson" must never tick him into
+	 * Attendees on a page full of role words. A short, deliberate list of
+	 * the jargon that recurs in titles, not an attempt to list every
+	 * English acronym. */
+	static FILL_INIT_SKIP = new Set(["ceo", "cfo", "coo", "cto", "cio", "cmo", "cro", "chro",
+		"cpa", "crm", "erp", "sap", "kpi", "roi", "sla", "sow", "nda", "msa", "poc",
+		"mvp", "seo", "okr", "qbr", "ebr", "fyi", "pr", "hr", "ai", "ml", "ui", "ux",
+		"qa", "po", "pm", "tbd", "eod", "eow", "asap", "eta", "wip", "dev",
+		"pto", "ooo", "wfh", "rto"]);
+
 	static _fillEsc(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
 
 	/** Canonical form: lowercase, every run of non-letters/digits is ONE space.
@@ -3932,13 +4006,29 @@ class Plugin extends AppPlugin {
 
 	static _fillIsUpper(w) { return !!w && w[0] !== w[0].toLowerCase() && w[0] === w[0].toUpperCase(); }
 
+	/** Does a record's name contain this title word whole? Case-insensitive,
+	 *  on Unicode word boundaries — the same edges the partial tier matches
+	 *  on, so "Keith" is found in "Keith Jones" and not in "Keisha". */
+	static _fillWordInName(name, raw) {
+		if (!name || !raw) return false;
+		try {
+			return new RegExp("(?<![\\p{L}\\p{N}])" + Plugin._fillEsc(raw) + "(?![\\p{L}\\p{N}])", "iu").test(name);
+		} catch (e) { return false; }
+	}
+
 	/** ONE regex per pool: canonical names as alternatives, longest first, so at
 	 *  any position the engine takes the longest name that fits ("John Doe"
 	 *  before "John") and the global scan moves past it so nothing overlaps.
-	 *  Also indexes the CAPITALISED words of every name for partial matching.
+	 *  Also indexes the CAPITALISED words of every name for partial matching,
+	 *  and every name's INITIALISMS for abbreviation matching ("EPA" finds
+	 *  Environmental Protection Agency; "DOE" finds Department of Energy).
+	 *  Two variants, because English abbreviates both ways: title-case words
+	 *  only (USA drops the lowercase "of"), and every word counting (DOE
+	 *  keeps it). All-caps words like "NASA" or "AT&T" are acronyms already
+	 *  and take no part.
 	 *  names: [{ name, id, rec? }] */
 	static _fillCompilePool(names, loose) {
-		const byKey = new Map(), byWord = new Map();
+		const byKey = new Map(), byWord = new Map(), byInit = new Map();
 		for (const n of names || []) {
 			const name = String(n.name || "").trim();
 			if (name.length < Plugin.FILL_MIN_CHARS) continue;
@@ -3954,6 +4044,33 @@ class Plugin extends AppPlugin {
 				seen.add(w);
 				if (!byWord.has(w)) byWord.set(w, []);
 				byWord.get(w).push(n);
+			}
+			// Initialism, in TWO variants because English abbreviates both
+			// ways: title-case words only ("United States of America" drops
+			// the lowercase "of" -> USA), or every word counting ("Department
+			// of Energy" keeps it -> DOE). Both are indexed; a title word
+			// only has to agree with one of them. Words that are themselves
+			// all-caps ("NASA") or start with a digit ("3M") are acronyms
+			// already and take no part, so "NASA Ames Research Center"
+			// shortens to ARC, which is in fact its abbreviation.
+			if (!loose) {
+				const words = name.split(/[^\p{L}\p{N}]+/u)
+					.filter((w) => /^\p{L}/u.test(w) && !/^\p{Lu}+$/u.test(w));
+				const inits = new Set();
+				const tc = words.filter((w) => /^\p{Lu}[\p{Ll}]*$/u.test(w));
+				if (tc.length >= 2) inits.add(tc.map((w) => w[0]).join("").toLowerCase());
+				if (words.length >= 2) inits.add(words.map((w) => w[0]).join("").toLowerCase());
+				for (const init of inits) {
+					// Three letters minimum: two is a sound, not a name. Not
+					// when the initialism is already a word of the name, and
+					// not the business jargon that titles use for the job
+					// rather than the record.
+					if (init.length < Plugin.FILL_MIN_CHARS || seen.has(init) ||
+						Plugin.FILL_INIT_SKIP.has(init)) continue;
+					n._init = init;
+					if (!byInit.has(init)) byInit.set(init, []);
+					byInit.get(init).push(n);
+				}
 			}
 		}
 		// Bigrams of every name's canonical words, for PHRASE matching: a run
@@ -3976,7 +4093,7 @@ class Plugin extends AppPlugin {
 			re = new RegExp("(?<![\\p{L}\\p{N}])(?:" + keys.map(Plugin._fillEsc).join("|") +
 				")(?![\\p{L}\\p{N}])", "yu");
 		} catch (e) { return null; }
-		return { re, byKey, byWord, byBigram };
+		return { re, byKey, byWord, byBigram, byInit };
 	}
 
 	/** Every pool item whose whole name occurs in the title, in title order.
@@ -4093,6 +4210,43 @@ class Plugin extends AppPlugin {
 				if (seen.has(it.id) || !free(w.start, w.end, it)) continue;
 				seen.add(it.id);
 				out.push({ item: it, name: it.name, word: w.raw });
+			}
+		}
+		return out;
+	}
+
+	/** The initialism tier, between whole-name and word-partial: an ALL-CAPS
+	 *  title word equal to the initialism of a multi-word name ("EPA" ->
+	 *  Environmental Protection Agency). All-caps because abbreviations are
+	 *  typed uppercase; a merely capitalised word is a normal partial.
+	 *
+	 *  A hit is STRONG — the caller may tick it — when the initialism maps
+	 *  to exactly one record in the pool: one word, one name, as sure as
+	 *  the whole name would be. Several names sharing an initialism come
+	 *  back weak, with the word on them, exactly like word partials. */
+	static _fillInit(title, pool, taken) {
+		if (!title || !pool || !pool.byInit) return [];
+		const out = [], seen = new Set();
+		const words = [];
+		const wordsRe = /[\p{L}\p{N}]+/gu;
+		let m, cpos = 0;
+		while ((m = wordsRe.exec(title))) {
+			words.push({ raw: m[0], start: cpos, end: cpos + m[0].length });
+			cpos += m[0].length + 1;
+		}
+		const free = (a, b, it) => !(taken || []).some((t) => a < t.end && t.start < b &&
+			(t.item.colName || "") === (it.colName || ""));
+		for (const w of words) {
+			if (w.raw.length < Plugin.FILL_MIN_CHARS || !/^\p{Lu}{3,}$/u.test(w.raw)) continue;
+			const low = w.raw.toLowerCase();
+			if (Plugin.FILL_INIT_SKIP.has(low)) continue;
+			const items = pool.byInit.get(low);
+			if (!items || !items.length || items.length > Plugin.FILL_PARTIAL_MAX) continue;
+			const strong = items.length === 1;
+			for (const it of items) {
+				if (seen.has(it.id) || !free(w.start, w.end, it)) continue;
+				seen.add(it.id);
+				out.push({ item: it, name: it.name, init: w.raw, word: strong ? null : w.raw, strong });
 			}
 		}
 		return out;
@@ -4215,19 +4369,22 @@ class Plugin extends AppPlugin {
 		} catch (e) { return null; }
 	}
 
-	/** Build the proposal for the target. Async because the pools are the
-	 *  records of other collections, loaded on demand and only the ones this
-	 *  collection's fields point at. Cached on the STATE, so it is per open:
-	 *  a Person created a minute ago is in the next open's pool. */
-	async _fillCompute(ctx) {
-		// With a ctx this runs DETACHED (the autofill engine): no dialog, no
-		// render, and it must never touch or race this._state.
-		const s = ctx || this._state, t = s.fillTarget;
-		const live = () => (s.detached ? true : this._state === s);
-		const done = (fill) => { if (!live()) return; s.fill = fill; if (!s.detached) this._render(); };
-		if (!t) return done({ status: "notarget" });
-		const col = s.cols.find((c) => c.guid === t.colGuid) || null;
-		if (!col) return done({ status: "notarget" });
+	/** The PROPOSAL ENGINE — one title, many fields, the proposal lines each
+	 *  field could take. This is the fill pipeline's deep module: target and
+	 *  environment in ({ cols, kw }), the fill payload out as a VALUE, and
+	 *  nothing mutated along the way. The matchers (canon, pools, whole-name,
+	 *  initialism, partial, dates) are its implementation; the dialog and the
+	 *  detached autofill engine are its only two consumers, and each owns what
+	 *  is not proposing — liveness, rendering, the workspace pass, and which
+	 *  lines get written (the write plan). The payload shape is the contract:
+	 *  { status: "notarget" | "nofields" | "ready", col, lines, skipped,
+	 *  unscoped, hasChoice, choiceFields, recordFields, dateFields, hiddenIds,
+	 *  hiddenSet, loaded }. */
+	async _propose(target, env) {
+		const t = target;
+		if (!t) return { status: "notarget" };
+		const col = env.cols.find((c) => c.guid === t.colGuid) || null;
+		if (!col) return { status: "notarget" };
 		let cfg = null;
 		try { cfg = col.api.getConfiguration() || {}; } catch (e) { cfg = {}; }
 		const fields = (cfg.fields || []).filter((f) => f.active !== false && !f.read_only &&
@@ -4235,7 +4392,7 @@ class Plugin extends AppPlugin {
 		const recordFields = fields.filter((f) => f.type === "record" && f.filter_colguid);
 		const skipped = fields.filter((f) => f.type === "record" && !f.filter_colguid).map((f) => f.label);
 		const choiceFields = fields.filter((f) => f.type === "choice");
-		if (!recordFields.length && !choiceFields.length) return done({ status: "nofields", col, skipped });
+		if (!recordFields.length && !choiceFields.length) return { status: "nofields", col, skipped };
 
 		// Load each target collection once. getAllRecords() is a PROMISE on a
 		// collection API (synchronous on the data API), hence the await.
@@ -4243,7 +4400,7 @@ class Plugin extends AppPlugin {
 		for (const f of recordFields) {
 			const g = f.filter_colguid;
 			if (targets[g]) continue;
-			const tc = s.cols.find((c) => c.guid === g);
+			const tc = env.cols.find((c) => c.guid === g);
 			if (!tc) { targets[g] = null; continue; }
 			let recs = [];
 			try { recs = (await tc.api.getAllRecords()) || []; } catch (e) { recs = []; }
@@ -4255,11 +4412,9 @@ class Plugin extends AppPlugin {
 			}
 			targets[g] = { col: tc, items, pool: Plugin._fillCompilePool(items) };
 		}
-		if (!live()) return;
 
 		const title = t.title;
-		if (!s.kw) s.kw = this._loadKeywords();
-		const kwFor = (fieldId) => ((s.kw.map[col.guid] || {})[fieldId]) || {};
+		const kwFor = (fieldId) => ((env.kw.map[col.guid] || {})[fieldId]) || {};
 		// The user's keywords for a record field: "Kian" -> the Habitat "Kians
 		// Identity". Whole, any case, and a hit is a whole-name hit: ticked, and
 		// a source for following.
@@ -4288,6 +4443,15 @@ class Plugin extends AppPlugin {
 				if (seen.has(h.item.id)) continue;
 				seen.add(h.item.id);
 				hits.push({ id: h.item.id, name: h.name, rec: h.item.rec, via: null });
+			}
+			// The initialism tier sits between whole names and word partials:
+			// "EPA" is derived, so it never outranks the literal name, but it
+			// is a deliberate abbreviation, so a unique one is ticked.
+			for (const h of (tg ? Plugin._fillInit(title, tg.pool, full) : [])) {
+				if (seen.has(h.item.id)) continue;
+				seen.add(h.item.id);
+				if (h.strong) hits.push({ id: h.item.id, name: h.name, rec: h.item.rec, via: null, init: h.init, strong: true });
+				else parts.push({ id: h.item.id, name: h.name, rec: h.item.rec, word: h.word, init: h.init });
 			}
 			for (const h of (tg ? Plugin._fillPartial(title, tg.pool, full) : [])) {
 				if (seen.has(h.item.id)) continue;
@@ -4322,7 +4486,13 @@ class Plugin extends AppPlugin {
 				try { ocfg = tg.col.api.getConfiguration() || {}; } catch (e) { continue; }
 				const paths = (ocfg.fields || []).filter((of) => of.active !== false &&
 					of.type === "record" && of.filter_colguid === f.filter_colguid);
-				if (!paths.length) continue;
+				// NO `if (!paths.length) continue;` here, though it looks like the
+				// obvious guard. The association can live entirely on the other
+				// side — "Employer" on the person, with no Employees-style field
+				// on the company at all — and then the back-references below are
+				// the ONLY path, and the page's own pre-filled values (the
+				// anchors) still deserve to speak. An empty paths just means the
+				// forward loop does nothing.
 				// From whole-name hits AND from partial ones: "Mamdooh" alone is
 				// enough to look up Mamdooh Afdile's company, but a follow from a
 				// partial inherits its weakness and starts unticked.
@@ -4343,6 +4513,12 @@ class Plugin extends AppPlugin {
 				}
 				for (const src of sources) {
 					const hit = src.h;
+					const addCand = (lr) => {
+						if (!lr || !lr.guid || lr.guid === t.guid) return;   // never the page itself
+						if (cands.has(lr.guid)) { if (!src.weak && !filled) cands.get(lr.guid).weak = false; return; }
+						let name = ""; try { name = lr.getName() || ""; } catch (e) {}
+						if (name) cands.set(lr.guid, { id: lr.guid, name, via: hit.name, weak: src.weak || filled });
+					};
 					for (const path of paths) {
 						let linked = [];
 						try {
@@ -4350,13 +4526,25 @@ class Plugin extends AppPlugin {
 							linked = p ? (p.linkedRecords ? p.linkedRecords()
 								: (p.linkedRecord() ? [p.linkedRecord()] : [])) : [];
 						} catch (e) { linked = []; }
-						for (const lr of (linked || [])) {
-							if (!lr || !lr.guid) continue;
-							if (cands.has(lr.guid)) { if (!src.weak && !filled) cands.get(lr.guid).weak = false; continue; }
-							let name = ""; try { name = lr.getName() || ""; } catch (e) {}
-							if (name) cands.set(lr.guid, { id: lr.guid, name, via: hit.name, weak: src.weak || filled });
-						}
+						for (const lr of (linked || [])) addCand(lr);
 					}
+					// ...and the association the OTHER way, stored on the other
+					// side: "Employer" on the person, which the org's own config
+					// never mentions. getBackReferences is the app's own index
+					// of exactly that. Property links only — a line mention is
+					// a note that once named USDA, not a fact about who belongs
+					// to it — and only records of the collection this field
+					// links to, because nothing else can be written into it.
+					try {
+						const refs = hit.rec.getBackReferences ? (await hit.rec.getBackReferences()) || [] : [];
+						for (const ref of refs) {
+							if (!ref || ref.kind !== "property") continue;
+							const lr = ref.record;
+							if (!lr || !lr.guid) continue;
+							if (this._recordCollectionGuid(lr) !== f.filter_colguid) continue;
+							addCand(lr);
+						}
+					} catch (e) {}
 				}
 			}
 			follow[f.id] = Array.from(cands.values());
@@ -4403,6 +4591,21 @@ class Plugin extends AppPlugin {
 
 		// Now against what the page already holds. Agrees -> hidden. Multi ->
 		// add. Single and empty -> fill. Single and different -> replace.
+		// The capitalised words of the title, the word tier's rules minus the
+		// cap. The cap exists so "Keith" does not propose twenty Keiths; but
+		// a word that survives into a follow candidate is no longer twenty
+		// people, it is the few who belong to the record the title matched.
+		const capWords = [];
+		{
+			const wordsRe = /[\p{L}\p{N}]+/gu;
+			let mm;
+			while ((mm = wordsRe.exec(title))) {
+				if (mm[0].length < Plugin.FILL_MIN_CHARS || !Plugin._fillIsUpper(mm[0])) continue;
+				const low = mm[0].toLowerCase();
+				if (Plugin.FILL_DATE_WORDS.has(Plugin.FILL_SV[low] || low)) continue;
+				capWords.push(mm[0]);
+			}
+		}
 		const lines = [];
 		const push = (f, kind, hits, viaAmbiguous) => this._fillPush(lines, t.rec, f, kind, hits, viaAmbiguous);
 		for (const f of recordFields) {
@@ -4415,11 +4618,22 @@ class Plugin extends AppPlugin {
 			// A follow candidate that is ALSO a partial match is the one line on
 			// the page with two independent signals ("Elin", and the Elin who
 			// works at the matched company): one line, ticked. The other Elins
-			// stay as unticked partials.
+			// stay as unticked partials. The same holds when the word was too
+			// common to survive the partial cap at all: "Keith" alone is twenty
+			// people, Keith at the matched USDA is one, and the title said both.
+			// Only from a strong source — a weak one adds nothing.
 			const fl = follow[f.id] || [];
 			const partById = new Map(parts.map((h) => [h.id, h]));
-			const merged = fl.map((h) => partById.has(h.id)
-				? Object.assign({}, h, { word: partById.get(h.id).word, strong: !h.weak }) : h);
+			const merged = fl.map((h) => {
+				const p = partById.get(h.id);
+				if (p) return Object.assign({}, h, { word: p.word,
+					init: p.init || null, strong: !h.weak });
+				if (!h.weak) {
+					const w = capWords.find((cw) => Plugin._fillWordInName(h.name, cw));
+					if (w) return Object.assign({}, h, { word: w, strong: true });
+				}
+				return h;
+			});
 			const followIds = new Set(fl.map((h) => h.id));
 			if (merged.length) push(f, "record", merged, fl.filter((h) => !h.weak).length > 1);
 			push(f, "record", parts.filter((h) => !followIds.has(h.id)), false);
@@ -4470,11 +4684,37 @@ class Plugin extends AppPlugin {
 			}
 		}
 		const hasChoice = choiceFields.length > 0 || recordFields.length > 0 || unscoped.length > 0;
-		done({ status: "ready", col, lines, skipped, unscoped, hasChoice, choiceFields, recordFields,
+		return { status: "ready", col, lines, skipped, unscoped, hasChoice, choiceFields, recordFields,
 			dateFields, hiddenIds, hiddenSet: pset ? pset.name : null,
-			wsStatus: (unscoped.length && !s.detached) ? "loading" : "none",
-			loaded: Object.values(targets).filter(Boolean).map((x) => x.col.name) });
-		if (unscoped.length && !s.detached) setTimeout(() => this._fillComputeWorkspace(s), 0);
+			loaded: Object.values(targets).filter(Boolean).map((x) => x.col.name) };
+	}
+
+	/** The dialog's call into the proposal engine. Owns everything that is not
+	 *  proposing: the loading state, liveness (the dialog can close mid-compute
+	 *  and a stale result must be discarded, never rendered), and the
+	 *  whole-workspace pass for fields that link anything — deliberately AFTER
+	 *  the scoped results are on screen, because it costs ~1.1s on a big
+	 *  workspace. */
+	async _fillCompute() {
+		const s = this._state;
+		if (!s) return;
+		// No page in front of the user: not an excuse to spin. _renderFill only
+		// schedules a compute while s.fill is unset, so a bare return here would
+		// leave the loading card up forever.
+		if (!s.fillTarget) {
+			if (!s.fill) { s.fill = { status: "notarget" }; this._render(); }
+			return;
+		}
+		const target = s.fillTarget;
+		let fill = null;
+		try {
+			fill = await this._propose(target, { cols: s.cols, kw: s.kw || this._loadKeywords() });
+		} catch (e) { return; }
+		if (this._state !== s || s.fillTarget !== target || !fill) return;
+		fill.wsStatus = (fill.unscoped && fill.unscoped.length) ? "loading" : "none";
+		s.fill = fill;
+		this._render();
+		if (fill.unscoped && fill.unscoped.length) setTimeout(() => this._fillComputeWorkspace(s), 0);
 	}
 
 	/** What the page already holds in one field, as [{ id, name }]. */
@@ -4507,7 +4747,8 @@ class Plugin extends AppPlugin {
 			if (curIds.has(h.id)) continue;
 			const mode = f.many ? "add" : (cur.length ? "replace" : "fill");
 			lines.push({ key: f.id + ":" + h.id, fieldId: f.id, field: f, kind, id: h.id, rec: h.rec || null,
-				name: h.name, via: h.via || null, word: h.word || null, colName: h.colName || null,
+				name: h.name, via: h.via || null, word: h.word || null, init: h.init || null,
+				colName: h.colName || null,
 				value: h.value, mode, current: cur, strong: !!h.strong, alias: !!h.alias, dateHit: !!h.dateHit,
 				defOn: mode !== "replace" && !h.weak &&
 					(h.strong || h.dateHit || (!(h.via && viaAmbiguous) && !h.word)) });
@@ -4739,6 +4980,61 @@ class Plugin extends AppPlugin {
 		return (s.fill && s.fill.status === "ready") ? s.fill.lines.filter((l) => this._fillIsOn(l)) : [];
 	}
 
+	/** Take one ticked line back off, from the FILLING summary. Three line
+	 *  kinds, three ways off — mirroring what each row's own tick does. */
+	_fillUntick(line) {
+		const s = this._state;
+		if (line.ws) s.fillPick[line.key] = null;
+		else if (line.edit) {
+			if (line.removed) { line.removed = false; line.id = null; line.name = null; }
+			s.fillOff.add(line.key);
+		} else if (s.fillSel[line.fieldId]) s.fillSel[line.fieldId].delete(line.key);
+		s.pop = null;
+		this._render();
+	}
+
+	/** Everything currently ticked, as one band of chips under the title
+	 *  band: the whole fill in one glance, each value with an × to take it
+	 *  back. Grouped by field — a field's label shows once, on its first
+	 *  chip — in page order, which fill.lines already is. */
+	_fillSummary(parent, picked) {
+		if (!picked.length) return;
+		const band = document.createElement("div");
+		band.className = "gp-fselband";
+		this._add(band, '<div class="gp-fselcaps">FILLING</div>');
+		const chips = document.createElement("div");
+		chips.className = "gp-fselchips";
+		let lastField = null;
+		for (const l of picked) {
+			const field = this._fillFieldOf(l);
+			if (!field) continue;
+			const chip = document.createElement("span");
+			chip.className = "gp-fselchip";
+			// An edit chip says what the CHANGE is: struck for a removal,
+			// old -> new for a swap, the plain value for a proposal.
+			let valHtml;
+			if (l.edit) {
+				if (l.removed) valHtml = '<span class="is-gone">' + this._esc(l.editName || "") + "</span>";
+				else if (l.id) valHtml = this._esc(l.editName || "") +
+					' <span class="gp-fselarrow">\u2192</span> ' + this._esc(l.name || "");
+				else valHtml = this._esc(l.editName || "");
+			} else valHtml = this._esc(l.name || "");
+			chip.innerHTML = (field.id !== lastField
+				? '<span class="gp-fselfield">' + this._esc(field.label) + "</span>" : "") +
+				'<span class="gp-fselval">' + this._fillIcon(l, l.edit ? (l.id || undefined) : undefined) + valHtml + "</span>";
+			lastField = field.id;
+			const x = document.createElement("button");
+			x.className = "gp-fselx";
+			x.textContent = "×";
+			x.setAttribute("data-gptip", l.edit ? "Drop this change" : "Do not fill this");
+			x.addEventListener("click", () => this._fillUntick(l));
+			chip.appendChild(x);
+			chips.appendChild(chip);
+		}
+		band.appendChild(chips);
+		parent.appendChild(band);
+	}
+
 	/** The icon beside a proposed or held value: the record's own, else its
 	 *  collection's; an option's own if it has one. Resolved once per line. */
 	_fillIcon(line, id) {
@@ -4780,6 +5076,7 @@ class Plugin extends AppPlugin {
 		const partial = !!line.word && !line.strong && !line.dateHit && !line.alias;
 		const bits = [];
 		if (line.word && line.alias) bits.push("alias “" + line.word + "”");
+		else if (line.init) bits.push("abbreviation “" + (typeof line.init === "string" ? line.init : line.word) + "”");
 		else if (partial) bits.push("partial match on “" + line.word + "”");
 		else if (line.via) bits.push("via " + line.via);
 		else bits.push("in the title");
@@ -4866,6 +5163,7 @@ class Plugin extends AppPlugin {
 			return;
 		}
 		this._fillEnsureSel();
+		this._fillSummary(body, this._fillPicked());
 		const groups = this._fillGroups();
 		const loose = fill.lines.filter((l) => l.ws);
 		const edits = fill.lines.filter((l) => l.edit);
@@ -4921,7 +5219,7 @@ class Plugin extends AppPlugin {
 					if (more > 0) {
 						const b = document.createElement("button");
 						b.className = "gp-fmoreline";
-						b.textContent = more + (more === 1 ? " more to choose from" : " more to choose from");
+						b.textContent = more + " more to choose from";
 						b.addEventListener("click", (e) => {
 							e.stopPropagation();
 							s.pop = s.pop === key ? null : key; s.popQ = ""; this._render();
@@ -5044,33 +5342,76 @@ class Plugin extends AppPlugin {
 		const pop = document.createElement("div");
 		pop.className = "gp-pop gp-fpop";
 		pop.addEventListener("click", (e) => e.stopPropagation());
-		this._add(pop, '<div class="gp-fpopnote">' +
-			(cur.length && !g.field.many ? "Ticking this replaces " + this._esc(cur.map((c) => c.name).join(", ")) + ". " : "") +
-			(g.cands.length > 1 ? "Other matches for " : "Matches for ") + this._esc(g.field.label) + ":</div>");
-		const list = document.createElement("div");
-		list.className = "gp-fpoplist";
+		if (cur.length && !g.field.many) {
+			this._add(pop, '<div class="gp-fpopnote">Ticking this replaces ' +
+				this._esc(cur.map((c) => c.name).join(", ")) + ".</div>");
+		}
+		// Date-only pickers have nothing to search: the proposals are the picker.
+		if (!g.cands.some((l) => l.kind !== "date")) {
+			const list = document.createElement("div");
+			list.className = "gp-fpoplist";
+			for (const l of g.cands) {
+				const why = this._fillWhy(l);
+				const b = document.createElement("button");
+				b.className = "gp-fpoprow" + (sel.has(l.key) ? " is-on" : "");
+				b.innerHTML = '<span class="gp-fpoplabel">' + this._fillIcon(l) + "<span>" + this._esc(l.name) + '</span></span><span class="gp-fpopmeta">' + this._esc(why.text) + "</span>";
+				b.addEventListener("click", () => this._fillPickCand(g, l));
+				list.appendChild(b);
+			}
+			pop.appendChild(list);
+			return pop;
+		}
+		// THE SEARCH LEADS, and one query filters BOTH groups: the matcher's
+		// proposals first (a ticked one stays visible whatever you type, so
+		// what Fill will write never leaves the page), then the field's whole
+		// target collection. Focus lands in the box (gp-popsearch), so open,
+		// glance, type is one motion.
+		const kind = g.field.type === "choice" ? "choice" : "record";
+		const w = document.createElement("div");
+		w.className = "gp-fpopsearch";
+		this._popSearch(w, kind === "choice" ? "Search options…" : "Search records…",
+			s.popQ, (v) => { s.popQ = v; this._render(); });
+		pop.appendChild(w);
+		const q = s.popQ || "";
+		const pinned = [], rest = [];
 		for (const l of g.cands) {
-			const why = this._fillWhy(l);
-			const b = document.createElement("button");
-			b.className = "gp-fpoprow" + (sel.has(l.key) ? " is-on" : "");
-			b.innerHTML = '<span class="gp-fpoplabel">' + this._fillIcon(l) + "<span>" + this._esc(l.name) + '</span></span><span class="gp-fpopmeta">' + this._esc(why.text) + "</span>";
-			b.addEventListener("click", () => this._fillPickCand(g, l));
-			list.appendChild(b);
+			if (q && !sel.has(l.key) && this._matchScore(l.name, q) <= 0) continue;
+			(sel.has(l.key) ? pinned : rest).push(l);
 		}
-		pop.appendChild(list);
-		// Search, below the matches: the fix for "close but wrong".
-		if (g.cands.some((l) => l.kind !== "date")) {
-			const more = this._fillSearchPop(g.field, g.field.type === "choice" ? "choice" : "record",
-				(id, name) => this._fillAddCand(g, id, name), null, null, true);
-			pop.appendChild(more);
+		const head = (label) => {
+			const h = document.createElement("div");
+			h.className = "gp-fpophead";
+			this._add(h, '<div class="gp-caps-s">' + this._esc(label) + "</div>");
+			pop.appendChild(h);
+		};
+		if (pinned.length || rest.length) {
+			head("FROM THE TITLE");
+			const list = document.createElement("div");
+			list.className = "gp-fpoplist";
+			for (const l of pinned.concat(rest)) {
+				const why = this._fillWhy(l);
+				const b = document.createElement("button");
+				b.className = "gp-fpoprow" + (sel.has(l.key) ? " is-on" : "");
+				b.innerHTML = '<span class="gp-fpoplabel">' + this._fillIcon(l) + "<span>" + this._esc(l.name) + '</span></span><span class="gp-fpopmeta">' + this._esc(why.text) + "</span>";
+				b.addEventListener("click", () => this._fillPickCand(g, l));
+				list.appendChild(b);
+			}
+			pop.appendChild(list);
 		}
+		const target = kind === "record" && g.field.filter_colguid
+			? (s.cols || []).find((c) => c.guid === g.field.filter_colguid) : null;
+		head(kind === "choice" ? "ALL OPTIONS" : (target ? "ALL " + target.name.toUpperCase() : "EVERYWHERE"));
+		pop.appendChild(this._fillSearchPop(g.field, kind,
+			(id, name) => this._fillAddCand(g, id, name), null, null, true, true));
 		return pop;
 	}
 
 	/** A search picker over a field's target collection (or the workspace
 	 *  pool for a field that links anywhere), or its options for a choice
-	 *  field. `bare` returns just the search + list, to nest under matches. */
-	_fillSearchPop(field, kind, onPick, markId, markText, bare) {
+	 *  field. `bare` returns just the search + list, to nest under matches;
+	 *  `skipSearch` drops the search box, for a picker whose box sits above
+	 *  both groups. */
+	_fillSearchPop(field, kind, onPick, markId, markText, bare, skipSearch) {
 		const s = this._state, fill = s.fill;
 		const pop = document.createElement("div");
 		pop.className = bare ? "gp-fpopmore" : "gp-pop gp-fpop";
@@ -5091,11 +5432,13 @@ class Plugin extends AppPlugin {
 			else { isWs = true; opts = (fill.wsItems || []).map((it) => ({ label: it.name, guid: it.id, meta: it.colName,
 				icon: it.colGuid ? this._colIconFor(it.colGuid) : "" })); }
 		}
-		const w = document.createElement("div");
-		w.className = "gp-fpopsearch";
-		this._popSearch(w, kind === "choice" ? "Search options…" : (isWs ? "Search the workspace…" : "Search records…"),
-			s.popQ, (v) => { s.popQ = v; this._render(); });
-		pop.appendChild(w);
+		if (!skipSearch) {
+			const w = document.createElement("div");
+			w.className = "gp-fpopsearch";
+			this._popSearch(w, kind === "choice" ? "Search options…" : (isWs ? "Search the workspace…" : "Search records…"),
+				s.popQ, (v) => { s.popQ = v; this._render(); });
+			pop.appendChild(w);
+		}
 		const list = document.createElement("div");
 		list.className = "gp-fpoplist";
 		const q = s.popQ || "";
@@ -5111,7 +5454,7 @@ class Plugin extends AppPlugin {
 				list.appendChild(b);
 			}
 			if (!ranked.length) this._add(list, '<div class="gp-fpopempty">' +
-				(isWs && !q ? "Type to search every record." : (bare && !q ? "Type to search for another." : "Nothing matches.")) + "</div>");
+				(isWs && !q ? "Type to search every record." : (bare && !q ? "Nothing here yet." : "Nothing matches.")) + "</div>");
 		}
 		pop.appendChild(list);
 		return pop;
@@ -5526,24 +5869,53 @@ class Plugin extends AppPlugin {
 		this._autofillRun(rec, guid, title, colGuid, fieldIds);
 	}
 
+	/** The WRITE PLAN — the one home of "what gets written". Ticked proposal
+	 *  lines in, one grouped write per field out, in the shape _writeFill
+	 *  consumes. Two policies, because there are exactly two callers and
+	 *  their contracts differ:
+	 *
+	 *    "picked"   the dialog's Fill button / Enter: the caller has already
+	 *               decided (via _fillIsOn), so everything given is grouped,
+	 *               workspace-wide lines land in their picked field, and edit
+	 *               lines ride along as swaps and removals.
+	 *    "autofill" the detached engine at record creation: the autofill
+	 *               contract applies here and nowhere else — engine defaults
+	 *               only (defOn), blanks only (never a replace), and only
+	 *               fields opted in per collection. Edits and workspace-wide
+	 *               lines are never part of it.
+	 *
+	 *  Before this lived here, grouping was written out twice and the
+	 *  eligibility rules were re-derived at each new line kind — which is the
+	 *  whole of the "I ticked it and it was not added" class of bug. */
+	_fillWritePlan(lines, policy, fieldIds) {
+		const autofill = policy === "autofill";
+		const byField = new Map();
+		for (const l of lines) {
+			if (autofill) {
+				if (l.ws || l.edit || !l.defOn || l.mode === "replace") continue;
+				if (fieldIds && fieldIds.indexOf(l.fieldId) === -1) continue;
+			}
+			const field = autofill ? l.field : this._fillFieldOf(l);
+			if (!field) continue;
+			if (!byField.has(field.id)) byField.set(field.id, { field, kind: l.kind, adds: [], values: [], edits: [] });
+			const g = byField.get(field.id);
+			if (l.edit) { g.edits.push({ editOf: l.editOf, newId: l.id }); continue; }
+			g.adds.push(l.id);
+			g.values.push(l.value);
+		}
+		return byField;
+	}
+
 	async _autofillRun(rec, guid, title, colGuid, fieldIds) {
 		let cols = [];
 		try { cols = await this._collections(); } catch (e) { return; }
-		const ctx = { detached: true, cols, kw: this._loadKeywords(), recCache: {},
-			fillTarget: { rec, guid, title, colGuid },
-			fillOff: new Set(), fillPick: {}, fill: null };
-		try { await this._fillCompute(ctx); } catch (e) { return; }
-		const fill = ctx.fill;
+		let fill = null;
+		try {
+			fill = await this._propose({ rec, guid, title, colGuid }, { cols, kw: this._loadKeywords() });
+		} catch (e) { return; }
 		if (!fill || fill.status !== "ready") return;
-		const lines = fill.lines.filter((l) => !l.ws && l.defOn && l.mode !== "replace" &&
-			fieldIds.indexOf(l.fieldId) !== -1);
-		if (!lines.length) return;
-		const byField = new Map();
-		for (const l of lines) {
-			if (!byField.has(l.fieldId)) byField.set(l.fieldId, { field: l.field, kind: l.kind, adds: [], values: [], edits: [] });
-			byField.get(l.fieldId).adds.push(l.id);
-			byField.get(l.fieldId).values.push(l.value);
-		}
+		const byField = this._fillWritePlan(fill.lines, "autofill", fieldIds);
+		if (!byField.size) return;
 		const live = this.data.getRecord(guid) || rec;
 		const { ok } = await this._writeFill(live, byField, true, guid);
 		if (ok) this._toast("Filled " + ok + (ok === 1 ? " field" : " fields") + " from the title of " +
@@ -5556,15 +5928,7 @@ class Plugin extends AppPlugin {
 		if (!s || s.busy || !picked.length) return;
 		s.busy = true;
 		const t = s.fillTarget;
-		const byField = new Map();
-		for (const l of picked) {
-			const field = this._fillFieldOf(l);
-			if (!field) continue;
-			if (!byField.has(field.id)) byField.set(field.id, { field, kind: l.kind, adds: [], values: [], edits: [] });
-			if (l.edit) { byField.get(field.id).edits.push({ editOf: l.editOf, newId: l.id }); continue; }
-			byField.get(field.id).adds.push(l.id);
-			byField.get(field.id).values.push(l.value);
-		}
+		const byField = this._fillWritePlan(picked, "picked");
 		// A FRESH handle, never the one the panel handed over when the dialog
 		// opened: a stale handle's writes reach the backend but not the open
 		// view, which read as "nothing happened until I restarted Thymer".
@@ -5580,7 +5944,7 @@ class Plugin extends AppPlugin {
 			// Name them. "Failed on 1 field" sent the last report looking for a
 			// value that had never been written.
 			this._toast((ok ? "Filled " + ok + ", but " : "") + (missed || []).join(" and ") +
-				(missed && missed.length === 1 ? " did not save." : " did not save."));
+				" did not save.");
 		}
 	}
 
@@ -6819,6 +7183,26 @@ class Plugin extends AppPlugin {
 .gp-fpopmeta { font-size: 11px; line-height: 14px; white-space: nowrap; color: var(--gp-text-dim); min-width: 0; max-width: 55%; overflow: hidden; text-overflow: ellipsis; flex: none; }
 .gp-fpoprow.is-on .gp-fpopmeta { color: inherit; }
 .gp-fpopempty { padding: 10px 12px; font-size: 12.5px; color: var(--gp-text-dim); font-family: var(--gp-font); }
+/* group headers inside a candidate picker: proposals, then the collection */
+.gp-fpophead { padding: 10px 12px 0; }
+.gp-fpopmore .gp-fpophead { padding-top: 4px; }
+/* the FILLING band: every ticked value as one chip, × to take it back */
+.gp-fselband { display: flex; align-items: baseline; gap: 12px; padding: 2px 0 10px; }
+.gp-fselcaps { font-weight: 500; font-size: 10px; line-height: 13px; letter-spacing: .14em; color: var(--gp-text-dim); white-space: nowrap; }
+.gp-fselchips { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
+.gp-fselchip {
+	display: inline-flex; align-items: center; gap: 7px; padding: 5px 8px 5px 10px;
+	background: var(--gp-surface-chip); border: 1px solid var(--gp-rule);
+	border-radius: 4px; max-width: 100%;
+}
+.gp-fselfield { font-weight: 500; font-size: 10.5px; line-height: 14px; letter-spacing: .1em; text-transform: uppercase; color: var(--gp-text-dim); }
+.gp-fselval { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; font-size: 12.5px; line-height: 16px; color: var(--gp-accent-text); min-width: 0; }
+.gp-fselval > span:not(.gp-colicon) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gp-fselval .gp-colicon { flex: none; }
+.gp-fselx { font-size: 13px; line-height: 1; color: var(--gp-text-dim); padding: 0 0 0 2px; }
+.gp-fselx:hover { color: var(--gp-text); }
+.gp-fselval .is-gone { color: var(--gp-text-dim); text-decoration: line-through; }
+.gp-fselarrow { color: var(--gp-text-dim); }
 /* footer: links left, count + actions right */
 .gp-ffootlinks { display: flex; align-items: center; gap: 16px; }
 .gp-flink { font-weight: 500; font-size: 12.5px; color: var(--gp-accent-text); padding: 4px 2px; border-radius: 4px; }

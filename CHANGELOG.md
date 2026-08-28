@@ -1,6 +1,63 @@
 # Changelog
 
-## Unreleased, on top of v1.3.1
+## v1.9.1, 2026-08-28
+
+Three small finds from the two-axis review (standards × spec), plus one it only pointed at.
+
+- **The caret stays where you put it.** A fix typed mid-query used to be thrown to the end of the search box by the re-render it triggered. The position is remembered now and restored after every redraw, clamped to the query's length.
+- **Dead plural branches cut.** Two ternaries whose both arms were identical ("1 more to choose from" and "did not save") are plain strings.
+- **Stores are looked up by key, not by slot.** `_tplStore()` was `_stagedStores()[0]` — positional coupling with no reason to exist.
+- **ADR-0001 gains one sentence**: the engine's `_init` stamp on pool items is scratch it built itself, not shared state — closing the review's only "mutates nothing" question.
+
+## v1.9.0, 2026-08-28
+
+An architecture pass: same behaviour, concentrated implementation. No user-visible change — every screen, key and write behaves exactly as 1.8.0 did.
+
+- **One staged store, three configurations.** Templates, Fill keywords, and Inherited/Default rules each hand-rolled the same two-stage persistence (config authoritative, localStorage mirror, rev-merge, stage-then-flush). The mechanism is written once now; the three stores are configurations of it. The rules store no longer piggybacks on the template store's stage, and the Cancel/Save choreography has one owner.
+- **One write plan.** "Which ticked lines get written?" was grouped independently by the Fill button and the detached autofill engine, with the eligibility rules re-derived at each new line kind. Both now consume one write plan with two named policies: `"picked"` (the dialog) and `"autofill"` (defaults only, blanks only, never replace, per-field opt-in).
+- **A proposal engine with a seam.** The 315-line orchestrator that proposed, ticked, ordered and materialised the preview is now a deep module — target and `{cols, kw}` in, the fill payload out as a value — with the dialog and the detached engine as its only two consumers. The implicit context the two callers shared (and that only a flag distinguished) is gone. Follow-engine fixes now have exactly one home.
+- **Recorded, not refactored:** the five per-type property-value switches are deliberately NOT unified — their accessor inventories differ (`records()` vs `linkedRecords()`), and unification would change live-API behaviour in the one region that has corrupted data before. See `docs/adr/0002`. The fill pipeline's seam, the Enter-in-title removal, and the single-file constraint are recorded in `docs/adr/0001` and `0003`; the domain vocabulary now lives in `CONTEXT.md`.
+
+## v1.8.0, 2026-08-27
+
+- **Removed: Enter in the title field.** It never fired, and it never could: Thymer's editor routes every keystroke through one hidden proxy textarea, so a keydown never carries the title field's identity — where the caret sits is state no plugin can see. Enter in the Fill dialog stays; that one is our own DOM and works. The keyboard path to a fill is therefore ⌘⇧G, glance, Enter.
+- **Fixed: associations through the page's own values were gated on the wrong schema.** The follow engine skipped a field entirely unless the matched record's collection had a field pointing back — so with the org stored only on the person ("Employer" → Acme Co) and nothing on the company, a pre-filled Acme Co was never consulted and "John/Jim 1:1" proposed nobody. The guard is gone: the page's own values now anchor recommendations whichever way the association is stored, and the top recommendations for two common names are the John and Jim whose org is already on the page.
+
+## v1.7.0, 2026-08-27
+
+**Corrections, one motion.** Guesses are only as good as their correction, so the picker and the dialog now both put what will be written in reach.
+
+- **The search leads.** Open a field's picker and the cursor is already in its search box, at the top. One query filters both groups at once: the matcher's proposals ("from the title", ticks and all) and the field's whole collection below ("all People", "all Companies", "all Options"). A ticked candidate stays visible whatever you type, so what Fill will write never leaves the page while you look for something better.
+- **Filling, in one glance.** Under the title band, every ticked value now sits as a chip grouped by field, each with an × to take it back — including the changes made under "On this page", struck for a removal, old → new for a swap. The band updates as you tick, and the footer count and Fill button follow.
+
+## v1.6.0, 2026-08-27
+
+**Common names, resolved through what the title already matched.** "USDA meeting with Keith": the org comes in by abbreviation, and now the Keith who belongs to USDA comes ticked — however many Keiths the workspace holds.
+
+- A title word that was too common to propose on its own ("Keith" is twenty people) no longer dies at the cap. When it survives inside the people of the record the title matched, it is the same two-signal line that was already ticked: the word, and the org.
+- Associations now count whichever way they are stored. The engine read what the matched record points at through its own fields; it now also reads Thymer's back-references, so an Employer field living on the person — with nothing on the org at all — connects just the same. Property links only: a note that once named USDA is not a fact about who belongs to it.
+- A record can never be proposed into a field on itself, which back-references made newly possible on collections that link their own records.
+
+## v1.5.0, 2026-08-27
+
+**Abbreviations, derived, not typed.** A title word like `EPA` now finds *Environmental Protection Agency*, `JLL` finds *Jones Lang LaSalle*, `DOE` finds *Department of Energy* — the initialism is computed from each record's own name, so there is nothing to maintain and no alias list to type.
+
+- Both ways English shortens: `USA` drops the little words out of *United States of America*, and `DOE` keeps the "of" in *Department of Energy*, so both are indexed and a title word only has to agree with one.
+- Words that are themselves acronyms take no part in the derivation, so *NASA Ames Research Center* shortens to `ARC` — which is in fact its abbreviation — and *AT&T Corporation* shortens to nothing worth keeping.
+- A hit is as sure as a whole name, or it is a partial: an initialism only one record in the pool could mean comes ticked; one several records share comes unticked and says so, like any partial.
+- A short list of business jargon — `CEO`, `KPI`, `OKR`, `EOD` and friends — never derives a match: the title means the meeting, not the person whose initials spell it.
+- Nothing changes about aliases; they remain for the abbreviations no initials can derive.
+
+## v1.4.0, 2026-08-27
+
+Two keyboard answers to "why is the hand back on the mouse".
+
+- **Enter applies in Fill From Title.** With the dialog open, Enter writes the ticked values, wherever the focus sits. Right after the shortcut chord the focus is still in the editor, so the whole trip is ⌘⇧G, glance, Enter. A popover open, or a button, link or input focused inside the dialog, keeps Enter for itself, so the pickers and searches work exactly as before.
+- **Enter in the title field fills the page.** Title a page and press Enter, and every field the preview would tick fills itself: blanks only, nothing replaced, and only lines sure enough to be ticked on their own. It runs the moment you ask, not on creation, so a page that started empty and was typed into is no longer left to the command. The trigger is identified the only way it can be from outside: an input at the top of the panel whose text is the page title. A property input in the same spot holds a property value, and its text never matches the title, so it can never fire the fill.
+
+Both rides reuse the same write the Fill button uses, with the autofill contract (never replace, verify after write), so a wrong guess can only ever add to an empty field, and a second Enter finds nothing left to do.
+
+## v1.3.2, 2026-08-25
 
 - **An archived property no longer blocks an add.** `active: false` is how Thymer removes a property from the UI while keeping its data, so a collection that has only an archived leftover does not have the property. Adding Action Status to Recipes was refused with "Skipped, already in Recipes: Action Status" because an archived "Deleted (Action Status)" still held the original's internal id. Neither the name nor the id of an archived field blocks an add now; where the id is the clash, the new property gets its own derived id so it cannot inherit the archived one's stored values, and the preview says so. A live property still blocks, on both name and id, and the reason now names it.
 - The plugin description is one sentence again. The rest is in this file and in the README.
