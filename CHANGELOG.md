@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.9.0, 2026-08-28
+
+An architecture pass: same behaviour, concentrated implementation. No user-visible change — every screen, key and write behaves exactly as 1.8.0 did.
+
+- **One staged store, three configurations.** Templates, Fill keywords, and Inherited/Default rules each hand-rolled the same two-stage persistence (config authoritative, localStorage mirror, rev-merge, stage-then-flush). The mechanism is written once now; the three stores are configurations of it. The rules store no longer piggybacks on the template store's stage, and the Cancel/Save choreography has one owner.
+- **One write plan.** "Which ticked lines get written?" was grouped independently by the Fill button and the detached autofill engine, with the eligibility rules re-derived at each new line kind. Both now consume one write plan with two named policies: `"picked"` (the dialog) and `"autofill"` (defaults only, blanks only, never replace, per-field opt-in).
+- **A proposal engine with a seam.** The 315-line orchestrator that proposed, ticked, ordered and materialised the preview is now a deep module — target and `{cols, kw}` in, the fill payload out as a value — with the dialog and the detached engine as its only two consumers. The implicit context the two callers shared (and that only a flag distinguished) is gone. Follow-engine fixes now have exactly one home.
+- **Recorded, not refactored:** the five per-type property-value switches are deliberately NOT unified — their accessor inventories differ (`records()` vs `linkedRecords()`), and unification would change live-API behaviour in the one region that has corrupted data before. See `docs/adr/0002`. The fill pipeline's seam, the Enter-in-title removal, and the single-file constraint are recorded in `docs/adr/0001` and `0003`; the domain vocabulary now lives in `CONTEXT.md`.
+
 ## v1.8.0, 2026-08-27
 
 - **Removed: Enter in the title field.** It never fired, and it never could: Thymer's editor routes every keystroke through one hidden proxy textarea, so a keydown never carries the title field's identity — where the caret sits is state no plugin can see. Enter in the Fill dialog stays; that one is our own DOM and works. The keyboard path to a fill is therefore ⌘⇧G, glance, Enter.

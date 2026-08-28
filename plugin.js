@@ -86,9 +86,7 @@ class Plugin extends AppPlugin {
 	_onFillKey = null;
 	_ovl = null;
 	_state = null;
-	_pending = null;
-	_pendingRules = null;
-	_pendingKw = null;
+	_staged = null;
 	_rulesCache = null;
 
 	onLoad() {
@@ -148,94 +146,132 @@ class Plugin extends AppPlugin {
 	}
 
 	// ══════════════════════════════════════════════════════════════════════
-	// Store
+	// Store: one staged-store mechanism, three configurations of it
 	// ══════════════════════════════════════════════════════════════════════
-
-	_lsKey() { return Plugin.LS_PREFIX + this.getWorkspaceGuid(); }
-
-	/** Read the template store. Config is authoritative; localStorage wins only
-	 *  when it is strictly newer (a config write that never landed). */
-	_loadStore() {
-		let fromCfg = null, fromLs = null;
-		try {
-			const cfg = this.getConfiguration();
-			fromCfg = (cfg && cfg.custom && cfg.custom.property_templates) || null;
-		} catch (e) {}
-		try { fromLs = JSON.parse(localStorage.getItem(this._lsKey()) || "null"); } catch (e) {}
-		const empty = { rev: 0, templates: [] };
-		const a = fromCfg && Array.isArray(fromCfg.templates) ? fromCfg : empty;
-		const b = fromLs && Array.isArray(fromLs.templates) ? fromLs : empty;
-		const win = (b.rev || 0) > (a.rev || 0) ? b : a;
-		return { rev: win.rev || 0, templates: (win.templates || []).slice() };
-	}
-
-	/* Saving the store has to happen in TWO stages, because saveConfiguration()
+	//
+	// Templates, Fill keywords and Inherited/Default rules all persist the
+	// same way, so the mechanism lives here once and each store is a
+	// configuration of it: a config key (authoritative, syncs across
+	// devices), a per-workspace localStorage mirror, and a load that prefers
+	// whichever side is strictly newer by `rev`.
+	//
+	/* Saving has to happen in TWO stages, because saveConfiguration()
 	 * reloads the plugin and a reload tears down whatever dialog is open. That
 	 * used to mean every save threw you back into Thymer mid-task.
 	 *
-	 *   _stageStore  writes localStorage immediately and remembers the change
-	 *   _flushStore  writes the plugin config, and is called when the dialog
-	 *                closes, so the reload lands on an empty screen
+	 *   stage   writes localStorage immediately and remembers the change
+	 *   flush   writes the plugin config, called when the dialog closes, so
+	 *           the reload lands on an empty screen
 	 *
-	 * Nothing is at risk in between: localStorage carries the newer `rev`, and
-	 * _loadStore prefers whichever side is newer, so an app that dies before
-	 * the flush still comes back with the change. */
-	_stageStore(next, rules) {
-		next.rev = Date.now();
-		this._pending = next;
-		if (rules) { rules.rev = next.rev; this._pendingRules = rules; this._rulesCache = rules; }
-		try { localStorage.setItem(this._lsKey(), JSON.stringify(next)); } catch (e) {}
-		return next;
+	 * Nothing is at risk in between: localStorage carries the newer `rev`,
+	 * and read prefers whichever side is newer, so an app that dies before
+	 * the flush still comes back with the change. All pending stores leave in
+	 * ONE config write, because every write reloads the plugin. */
+
+	_makeStagedStore(cfgKey, lsPrefix, empty, normalise) {
+		const self = this;
+		const lsKey = lsPrefix ? lsPrefix + self.getWorkspaceGuid() : null;
+		const store = {
+			cfgKey, lsKey, pending: null,
+			read() {
+				let fromCfg = null, fromLs = null;
+				try { fromCfg = normalise((self.getConfiguration().custom || {})[cfgKey]); } catch (e) {}
+				if (lsKey) { try { fromLs = normalise(JSON.parse(localStorage.getItem(lsKey) || "null")); } catch (e) {} }
+				const a = fromCfg || empty, b = fromLs || empty;
+				const win = (b.rev || 0) > (a.rev || 0) ? b : a;
+				return win === empty ? JSON.parse(JSON.stringify(empty)) : win;
+			},
+			stage(next) {
+				next.rev = Date.now();
+				store.pending = next;
+				if (lsKey) { try { localStorage.setItem(lsKey, JSON.stringify(next)); } catch (e) {} }
+				return next;
+			},
+			drop() { store.pending = null; },
+		};
+		return store;
+	}
+
+	_stagedStores() {
+		if (!this._staged) {
+			this._staged = [
+				// The config key stays `property_templates` even though the plugin is
+				// now called Global Properties: renaming it would orphan every template
+				// already saved. Same reason the localStorage key keeps its pt_ prefix.
+				this._makeStagedStore("property_templates", Plugin.LS_PREFIX,
+					{ rev: 0, templates: [] }, Plugin._normaliseTemplates),
+				this._makeStagedStore(Plugin.KW_KEY, Plugin.KW_LS,
+					// The full shape even when empty — HEAD's load always returned
+					// auto and shortcut keys, and consumers may lean on that.
+					{ rev: 0, map: {}, auto: {}, shortcut: null }, Plugin._normaliseKeywords),
+				// Rules carry no localStorage mirror of their own: they are staged
+				// through the shared flush and recovered by nothing but the config.
+				this._makeStagedStore(Plugin.RULES_KEY, null,
+					{ rev: 0, enabled: false, blocklist: [], rules: [] }, Plugin._normaliseRules),
+			];
+		}
+		return this._staged;
+	}
+
+	_tplStore() { return this._stagedStores()[0]; }
+	_kwStore() { return this._stagedStores()[1]; }
+	_rulesStore() { return this._stagedStores()[2]; }
+
+	/** Each store's shape check and normalisation, on load. A side that is not
+	 *  the store's shape reads as absent, which is how an empty workspace and
+	 *  a corrupted key behave identically. */
+	static _normaliseTemplates(raw) {
+		return (raw && Array.isArray(raw.templates))
+			? { rev: raw.rev || 0, templates: raw.templates.slice() } : null;
+	}
+
+	static _normaliseKeywords(raw) {
+		if (!raw || !raw.map) return null;
+		// `auto` (colGuid -> [fieldIds] that fill themselves when a new record
+		// arrives WITH a title) and `shortcut` (the Fill From Title chord) rode
+		// in later, 1.3.0-dev. Deep-cloned so a caller's mutations never leak
+		// into the config or the mirror.
+		return { rev: raw.rev || 0,
+			map: JSON.parse(JSON.stringify(raw.map)),
+			auto: JSON.parse(JSON.stringify(raw.auto || {})),
+			shortcut: raw.shortcut ? JSON.parse(JSON.stringify(raw.shortcut)) : null };
+	}
+
+	static _normaliseRules(raw) {
+		return (raw && Array.isArray(raw.rules)) ? raw : null;
+	}
+
+	_loadStore() { return this._tplStore().read(); }
+	_loadKeywords() { return this._kwStore().read(); }
+	_loadRules() { return this._rulesStore().read(); }
+
+	_stageStore(next) { return this._tplStore().stage(next); }
+
+	_stageKeywords(kw) {
+		const out = this._kwStore().stage(kw);
+		this._fillKw = kw;                 // the shortcut listener reads this cache
+		return out;
 	}
 
 	async _flushStore() {
-		const next = this._pending, rules = this._pendingRules, kw = this._pendingKw;
-		if (!next && !rules && !kw) return false;
-		this._pending = null;
-		this._pendingRules = null;
-		this._pendingKw = null;
+		const pending = this._stagedStores().filter((st) => st.pending)
+			.map((st) => ({ cfgKey: st.cfgKey, next: st.pending }));
+		if (!pending.length) return false;
+		for (const st of this._stagedStores()) st.pending = null;
 		const mine = (await this.data.getAllGlobalPlugins() || [])
 			.find((p) => p.getGuid() === this.getGuid());
 		if (!mine) return false;
 		const cfg = JSON.parse(JSON.stringify(this.getConfiguration()));
 		cfg.custom = Object.assign({}, cfg.custom || {});
-		// The config key stays `property_templates` even though the plugin is
-		// now called Global Properties: renaming it would orphan every template
-		// already saved. Same reason the localStorage key keeps its pt_ prefix.
-		if (next) cfg.custom.property_templates = next;
-		if (rules) cfg.custom[Plugin.RULES_KEY] = rules;
-		if (kw) cfg.custom[Plugin.KW_KEY] = kw;
+		for (const p of pending) cfg.custom[p.cfgKey] = p.next;
 		return await mine.saveConfiguration(cfg);
 	}
 
 	/* Fill From Title keywords: per collection, per choice field, per option, a
 	 * list of words or phrases that select that option when found in a title
-	 * ("Möte" -> Contact Log). Same two-stage save as everything else here. */
+	 * ("Möte" -> Contact Log). Same staged store as everything else here. */
 	static KW_KEY = "fill_keywords";
 	static KW_LS = "pt_fillkw_v1_";
-
-	_loadKeywords() {
-		let a = null, b = null;
-		try { a = (this.getConfiguration().custom || {})[Plugin.KW_KEY] || null; } catch (e) {}
-		try { b = JSON.parse(localStorage.getItem(Plugin.KW_LS + this.getWorkspaceGuid()) || "null"); } catch (e) {}
-		const empty = { rev: 0, map: {} };
-		a = a && a.map ? a : empty; b = b && b.map ? b : empty;
-		const win = (b.rev || 0) > (a.rev || 0) ? b : a;
-		// `auto` (colGuid -> [fieldIds] that fill themselves when a new record
-		// arrives WITH a title) and `shortcut` (the Fill From Title chord) rode
-		// in later, 1.3.0-dev.
-		return { rev: win.rev || 0, map: JSON.parse(JSON.stringify(win.map || {})),
-			auto: JSON.parse(JSON.stringify(win.auto || {})),
-			shortcut: win.shortcut ? JSON.parse(JSON.stringify(win.shortcut)) : null };
-	}
-
-	_stageKeywords(kw) {
-		kw.rev = Date.now();
-		this._pendingKw = kw;
-		this._fillKw = kw;                 // the shortcut listener reads this cache
-		try { localStorage.setItem(Plugin.KW_LS + this.getWorkspaceGuid(), JSON.stringify(kw)); } catch (e) {}
-		return kw;
-	}
 
 	// ══════════════════════════════════════════════════════════════════════
 	// Collections and fields
@@ -1486,15 +1522,8 @@ class Plugin extends AppPlugin {
 	 * properties on the same event is how data got corrupted before. */
 	static RULES_KEY = "property_rules";
 
-	_loadRules() {
-		let r = null;
-		try {
-			const cfg = this.getConfiguration();
-			r = (cfg && cfg.custom && cfg.custom[Plugin.RULES_KEY]) || null;
-		} catch (e) {}
-		return r && Array.isArray(r.rules)
-			? r : { rev: 0, enabled: false, blocklist: [], rules: [] };
-	}
+	// `_loadRules` lives with the staged stores (one mechanism, three
+	// configurations); this section only owns RULES_KEY and the import.
 
 	/** The installed Auto-Init plugin, found by the shape of its config rather
 	 *  than by name, so a renamed install is still recognised. */
@@ -1595,7 +1624,10 @@ class Plugin extends AppPlugin {
 		const next = this._migrateAutoInit(found.ai);
 		s.rules = next;
 		s.vModel = null;
-		this._stageStore(this._loadStore(), next);
+		// Stage rules alone: the old piggyback re-stamped the template store's
+		// rev for identical content. The creation engine's cache follows.
+		this._rulesStore().stage(next);
+		this._rulesCache = next;
 		s.busy = false;
 		this._render();
 		this._toast("Imported " + next.rules.length + " rules. " +
@@ -2333,11 +2365,12 @@ class Plugin extends AppPlugin {
 		this._quiet(acts, "Cancel", () => {
 			// Drop the staged rules before closing, or _closeModal would flush
 			// the very edits Cancel just discarded. Not after a Save, though:
-			// _pendingRules then holds that SAVED state, because an edit only
+			// The rules store's pending then holds that SAVED state, because an
+			// edit only
 			// touches the scratch model and never re-stages. Clearing it there
 			// would throw away a save the note had already confirmed, and only
 			// the localStorage mirror's newer rev would have got it back.
-			if (!s.vSaved) this._pendingRules = null;
+			if (!s.vSaved) this._rulesStore().drop();
 			s.vDirty = false;
 			this._closeModal();
 		});
@@ -2349,7 +2382,8 @@ class Plugin extends AppPlugin {
 		const s = this._state;
 		s.rules.rules = this._modelToRules(s.vModel);
 		s.rules.blocklist = s.vModel.blocklist.slice();
-		this._stageStore(this._loadStore(), s.rules);
+		this._rulesStore().stage(s.rules);
+		this._rulesCache = s.rules;
 		s.vDirty = false;
 		s.vSaved = true;
 		this._render();
@@ -4279,19 +4313,22 @@ class Plugin extends AppPlugin {
 		} catch (e) { return null; }
 	}
 
-	/** Build the proposal for the target. Async because the pools are the
-	 *  records of other collections, loaded on demand and only the ones this
-	 *  collection's fields point at. Cached on the STATE, so it is per open:
-	 *  a Person created a minute ago is in the next open's pool. */
-	async _fillCompute(ctx) {
-		// With a ctx this runs DETACHED (the autofill engine): no dialog, no
-		// render, and it must never touch or race this._state.
-		const s = ctx || this._state, t = s.fillTarget;
-		const live = () => (s.detached ? true : this._state === s);
-		const done = (fill) => { if (!live()) return; s.fill = fill; if (!s.detached) this._render(); };
-		if (!t) return done({ status: "notarget" });
-		const col = s.cols.find((c) => c.guid === t.colGuid) || null;
-		if (!col) return done({ status: "notarget" });
+	/** The PROPOSAL ENGINE — one title, many fields, the proposal lines each
+	 *  field could take. This is the fill pipeline's deep module: target and
+	 *  environment in ({ cols, kw }), the fill payload out as a VALUE, and
+	 *  nothing mutated along the way. The matchers (canon, pools, whole-name,
+	 *  initialism, partial, dates) are its implementation; the dialog and the
+	 *  detached autofill engine are its only two consumers, and each owns what
+	 *  is not proposing — liveness, rendering, the workspace pass, and which
+	 *  lines get written (the write plan). The payload shape is the contract:
+	 *  { status: "notarget" | "nofields" | "ready", col, lines, skipped,
+	 *  unscoped, hasChoice, choiceFields, recordFields, dateFields, hiddenIds,
+	 *  hiddenSet, loaded }. */
+	async _propose(target, env) {
+		const t = target;
+		if (!t) return { status: "notarget" };
+		const col = env.cols.find((c) => c.guid === t.colGuid) || null;
+		if (!col) return { status: "notarget" };
 		let cfg = null;
 		try { cfg = col.api.getConfiguration() || {}; } catch (e) { cfg = {}; }
 		const fields = (cfg.fields || []).filter((f) => f.active !== false && !f.read_only &&
@@ -4299,7 +4336,7 @@ class Plugin extends AppPlugin {
 		const recordFields = fields.filter((f) => f.type === "record" && f.filter_colguid);
 		const skipped = fields.filter((f) => f.type === "record" && !f.filter_colguid).map((f) => f.label);
 		const choiceFields = fields.filter((f) => f.type === "choice");
-		if (!recordFields.length && !choiceFields.length) return done({ status: "nofields", col, skipped });
+		if (!recordFields.length && !choiceFields.length) return { status: "nofields", col, skipped };
 
 		// Load each target collection once. getAllRecords() is a PROMISE on a
 		// collection API (synchronous on the data API), hence the await.
@@ -4307,7 +4344,7 @@ class Plugin extends AppPlugin {
 		for (const f of recordFields) {
 			const g = f.filter_colguid;
 			if (targets[g]) continue;
-			const tc = s.cols.find((c) => c.guid === g);
+			const tc = env.cols.find((c) => c.guid === g);
 			if (!tc) { targets[g] = null; continue; }
 			let recs = [];
 			try { recs = (await tc.api.getAllRecords()) || []; } catch (e) { recs = []; }
@@ -4319,11 +4356,9 @@ class Plugin extends AppPlugin {
 			}
 			targets[g] = { col: tc, items, pool: Plugin._fillCompilePool(items) };
 		}
-		if (!live()) return;
 
 		const title = t.title;
-		if (!s.kw) s.kw = this._loadKeywords();
-		const kwFor = (fieldId) => ((s.kw.map[col.guid] || {})[fieldId]) || {};
+		const kwFor = (fieldId) => ((env.kw.map[col.guid] || {})[fieldId]) || {};
 		// The user's keywords for a record field: "Kian" -> the Habitat "Kians
 		// Identity". Whole, any case, and a hit is a whole-name hit: ticked, and
 		// a source for following.
@@ -4593,11 +4628,37 @@ class Plugin extends AppPlugin {
 			}
 		}
 		const hasChoice = choiceFields.length > 0 || recordFields.length > 0 || unscoped.length > 0;
-		done({ status: "ready", col, lines, skipped, unscoped, hasChoice, choiceFields, recordFields,
+		return { status: "ready", col, lines, skipped, unscoped, hasChoice, choiceFields, recordFields,
 			dateFields, hiddenIds, hiddenSet: pset ? pset.name : null,
-			wsStatus: (unscoped.length && !s.detached) ? "loading" : "none",
-			loaded: Object.values(targets).filter(Boolean).map((x) => x.col.name) });
-		if (unscoped.length && !s.detached) setTimeout(() => this._fillComputeWorkspace(s), 0);
+			loaded: Object.values(targets).filter(Boolean).map((x) => x.col.name) };
+	}
+
+	/** The dialog's call into the proposal engine. Owns everything that is not
+	 *  proposing: the loading state, liveness (the dialog can close mid-compute
+	 *  and a stale result must be discarded, never rendered), and the
+	 *  whole-workspace pass for fields that link anything — deliberately AFTER
+	 *  the scoped results are on screen, because it costs ~1.1s on a big
+	 *  workspace. */
+	async _fillCompute() {
+		const s = this._state;
+		if (!s) return;
+		// No page in front of the user: not an excuse to spin. _renderFill only
+		// schedules a compute while s.fill is unset, so a bare return here would
+		// leave the loading card up forever.
+		if (!s.fillTarget) {
+			if (!s.fill) { s.fill = { status: "notarget" }; this._render(); }
+			return;
+		}
+		const target = s.fillTarget;
+		let fill = null;
+		try {
+			fill = await this._propose(target, { cols: s.cols, kw: s.kw || this._loadKeywords() });
+		} catch (e) { return; }
+		if (this._state !== s || s.fillTarget !== target || !fill) return;
+		fill.wsStatus = (fill.unscoped && fill.unscoped.length) ? "loading" : "none";
+		s.fill = fill;
+		this._render();
+		if (fill.unscoped && fill.unscoped.length) setTimeout(() => this._fillComputeWorkspace(s), 0);
 	}
 
 	/** What the page already holds in one field, as [{ id, name }]. */
@@ -5752,24 +5813,53 @@ class Plugin extends AppPlugin {
 		this._autofillRun(rec, guid, title, colGuid, fieldIds);
 	}
 
+	/** The WRITE PLAN — the one home of "what gets written". Ticked proposal
+	 *  lines in, one grouped write per field out, in the shape _writeFill
+	 *  consumes. Two policies, because there are exactly two callers and
+	 *  their contracts differ:
+	 *
+	 *    "picked"   the dialog's Fill button / Enter: the caller has already
+	 *               decided (via _fillIsOn), so everything given is grouped,
+	 *               workspace-wide lines land in their picked field, and edit
+	 *               lines ride along as swaps and removals.
+	 *    "autofill" the detached engine at record creation: the autofill
+	 *               contract applies here and nowhere else — engine defaults
+	 *               only (defOn), blanks only (never a replace), and only
+	 *               fields opted in per collection. Edits and workspace-wide
+	 *               lines are never part of it.
+	 *
+	 *  Before this lived here, grouping was written out twice and the
+	 *  eligibility rules were re-derived at each new line kind — which is the
+	 *  whole of the "I ticked it and it was not added" class of bug. */
+	_fillWritePlan(lines, policy, fieldIds) {
+		const autofill = policy === "autofill";
+		const byField = new Map();
+		for (const l of lines) {
+			if (autofill) {
+				if (l.ws || l.edit || !l.defOn || l.mode === "replace") continue;
+				if (fieldIds && fieldIds.indexOf(l.fieldId) === -1) continue;
+			}
+			const field = autofill ? l.field : this._fillFieldOf(l);
+			if (!field) continue;
+			if (!byField.has(field.id)) byField.set(field.id, { field, kind: l.kind, adds: [], values: [], edits: [] });
+			const g = byField.get(field.id);
+			if (l.edit) { g.edits.push({ editOf: l.editOf, newId: l.id }); continue; }
+			g.adds.push(l.id);
+			g.values.push(l.value);
+		}
+		return byField;
+	}
+
 	async _autofillRun(rec, guid, title, colGuid, fieldIds) {
 		let cols = [];
 		try { cols = await this._collections(); } catch (e) { return; }
-		const ctx = { detached: true, cols, kw: this._loadKeywords(), recCache: {},
-			fillTarget: { rec, guid, title, colGuid },
-			fillOff: new Set(), fillPick: {}, fill: null };
-		try { await this._fillCompute(ctx); } catch (e) { return; }
-		const fill = ctx.fill;
+		let fill = null;
+		try {
+			fill = await this._propose({ rec, guid, title, colGuid }, { cols, kw: this._loadKeywords() });
+		} catch (e) { return; }
 		if (!fill || fill.status !== "ready") return;
-		const lines = fill.lines.filter((l) => !l.ws && l.defOn && l.mode !== "replace" &&
-			fieldIds.indexOf(l.fieldId) !== -1);
-		if (!lines.length) return;
-		const byField = new Map();
-		for (const l of lines) {
-			if (!byField.has(l.fieldId)) byField.set(l.fieldId, { field: l.field, kind: l.kind, adds: [], values: [], edits: [] });
-			byField.get(l.fieldId).adds.push(l.id);
-			byField.get(l.fieldId).values.push(l.value);
-		}
+		const byField = this._fillWritePlan(fill.lines, "autofill", fieldIds);
+		if (!byField.size) return;
 		const live = this.data.getRecord(guid) || rec;
 		const { ok } = await this._writeFill(live, byField, true, guid);
 		if (ok) this._toast("Filled " + ok + (ok === 1 ? " field" : " fields") + " from the title of " +
@@ -5782,15 +5872,7 @@ class Plugin extends AppPlugin {
 		if (!s || s.busy || !picked.length) return;
 		s.busy = true;
 		const t = s.fillTarget;
-		const byField = new Map();
-		for (const l of picked) {
-			const field = this._fillFieldOf(l);
-			if (!field) continue;
-			if (!byField.has(field.id)) byField.set(field.id, { field, kind: l.kind, adds: [], values: [], edits: [] });
-			if (l.edit) { byField.get(field.id).edits.push({ editOf: l.editOf, newId: l.id }); continue; }
-			byField.get(field.id).adds.push(l.id);
-			byField.get(field.id).values.push(l.value);
-		}
+		const byField = this._fillWritePlan(picked, "picked");
 		// A FRESH handle, never the one the panel handed over when the dialog
 		// opened: a stale handle's writes reach the backend but not the open
 		// view, which read as "nothing happened until I restarted Thymer".
