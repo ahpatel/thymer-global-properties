@@ -10,7 +10,7 @@ Fill From Title grew as one orchestrator (`_fillCompute`) that proposed values, 
 
 The pipeline is three modules at one seam:
 
-1. **Proposal engine** (`_propose`) — deep module. Target `{rec, guid, title, colGuid}` + `{cols, kw}` in; the fill payload out as a **value**. Owns all matching and inference: whole-name, initialism, partial, keyword aliases, follow (forward paths, page anchors, back-references), choices, dates, ticked-on-its-own defaults, ordering, hidden-set detection. Pure-ish: reads data, mutates nothing.
+1. **Proposal engine** (`_propose`) — deep module. Target `{rec, guid, title, colGuid}` + `{cols, kw}` in; the fill payload out as a **value**. Owns all matching and inference: whole-name, initialism, partial, keyword aliases, follow (forward paths, page anchors, back-references), choices, dates, ticked-on-its-own defaults, ordering, hidden-set detection. Pure-ish: reads data, mutates nothing in Thymer's records or the dialog state — its one internal write is a derived `_init` stamp on pool items the engine itself built for the call (scratch, not shared state).
 2. **Selection** — the dialog's state machine (`_fillSel/_fillPick/_fillExclusive/_fillIsOn`). UI-only; not part of the engine.
 3. **Write plan** (`_fillWritePlan`) — ticked lines in, one grouped write per field out. Two named policies: `"picked"` (the dialog — caller already decided) and `"autofill"` (the detached contract: engine defaults only, blanks only, never replace, per-field opt-in).
 

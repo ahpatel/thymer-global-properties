@@ -213,9 +213,9 @@ class Plugin extends AppPlugin {
 		return this._staged;
 	}
 
-	_tplStore() { return this._stagedStores()[0]; }
-	_kwStore() { return this._stagedStores()[1]; }
-	_rulesStore() { return this._stagedStores()[2]; }
+	_tplStore() { return this._stagedStores().find((st) => st.cfgKey === "property_templates"); }
+	_kwStore() { return this._stagedStores().find((st) => st.cfgKey === Plugin.KW_KEY); }
+	_rulesStore() { return this._stagedStores().find((st) => st.cfgKey === Plugin.RULES_KEY); }
 
 	/** Each store's shape check and normalisation, on load. A side that is not
 	 *  the store's shape reads as absent, which is how an empty workspace and
@@ -381,14 +381,25 @@ class Plugin extends AppPlugin {
 	}
 
 	/* Every popover search: focus survives the re-render that each keystroke
-	 * causes, with the caret left at the end. Without this the field loses focus
-	 * after one character, because typing re-renders the whole panel and builds
-	 * a brand new input. */
+	 * causes, and so does the CARET POSITION. Without the position, a fix typed
+	 * mid-query was thrown back to the end of the field by the very re-render
+	 * it triggered. Without this the field loses focus after one character,
+	 * because typing re-renders the whole panel and builds a brand new input. */
 	_popSearch(parent, placeholder, value, onInput) {
-		const inp = this._search(parent, placeholder, value, onInput);
+		const inp = this._search(parent, placeholder, value, (v) => {
+			try { this._state.popQAt = inp.selectionStart; } catch (e) {}
+			onInput(v);
+		});
 		inp.classList.add("gp-popsearch");
 		setTimeout(() => {
-			try { inp.focus(); inp.setSelectionRange(inp.value.length, inp.value.length); } catch (e) {}
+			try {
+				inp.focus();
+				// Clamped: a position remembered from a previous popover session
+				// can exceed a fresh, shorter query.
+				const at = Math.min(this._state.popQAt != null ? this._state.popQAt : inp.value.length,
+					inp.value.length);
+				inp.setSelectionRange(at, at);
+			} catch (e) {}
 		}, 0);
 		return inp;
 	}
@@ -5163,7 +5174,7 @@ class Plugin extends AppPlugin {
 					if (more > 0) {
 						const b = document.createElement("button");
 						b.className = "gp-fmoreline";
-						b.textContent = more + (more === 1 ? " more to choose from" : " more to choose from");
+						b.textContent = more + " more to choose from";
 						b.addEventListener("click", (e) => {
 							e.stopPropagation();
 							s.pop = s.pop === key ? null : key; s.popQ = ""; this._render();
@@ -5888,7 +5899,7 @@ class Plugin extends AppPlugin {
 			// Name them. "Failed on 1 field" sent the last report looking for a
 			// value that had never been written.
 			this._toast((ok ? "Filled " + ok + ", but " : "") + (missed || []).join(" and ") +
-				(missed && missed.length === 1 ? " did not save." : " did not save."));
+				" did not save.");
 		}
 	}
 
